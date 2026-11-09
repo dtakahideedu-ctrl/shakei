@@ -19,6 +19,7 @@ const store = {
   get(k) { try { return localStorage.getItem('shakei.' + k); } catch (e) { return null; } },
   set(k, v) { try { localStorage.setItem('shakei.' + k, v); } catch (e) { /* 保存できなくても動く */ } }
 };
+let uiMode = 'shakei';
 
 // ---------- 状態 ----------
 const S = {
@@ -47,7 +48,7 @@ function readColors() {
   for (const n of ['ink', 'muted', 'line', 'main', 'sub', 'yunde-ln', 'mete-ln', 'ya', 'guide', 'surface', 'sunk', 'bg', 'info-bg', 'ov-yunde', 'ov-mete', 'ov-ya', 'ov-guide', 'ov-trunk']) C[n] = cs.getPropertyValue('--' + n).trim();
 }
 readColors();
-const redrawTheme = () => { readColors(); drawAll(); drawTimeline(); drawChart(); renderTarget(); };
+const redrawTheme = () => { readColors(); drawAll(); drawTimeline(); drawChart(); renderTarget(); drawTeAll(); };
 try { matchMedia('(prefers-color-scheme: dark)').addEventListener('change', redrawTheme); } catch (e) { /* 古いブラウザ */ }
 new MutationObserver(redrawTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-palette'] });
 // 配色: 鉄紺メイン（既定）と臙脂メイン。この端末に覚えておく
@@ -76,7 +77,7 @@ const fmtT = (t) => (Number.isFinite(t) ? t.toFixed(1) : '—');
 // ---------- サンプル ----------
 function loadSample() {
   const smp = K.makeSample();
-  S.sample = true; $('#sampleBanner').hidden = false;
+  S.sample = true; syncBanner();
   for (const key of ['front', 'side']) {
     const v = V[key];
     const tr = K.prepareTrack(smp[key]);
@@ -160,7 +161,7 @@ function visibleKeys() {
 }
 function setLayout(l) {
   S.layout = l;
-  $$('.viewbar .seg button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.layout === l)));
+  $$('#viewer .viewbar .seg button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.layout === l)));
   layoutFrames(); drawAll();
 }
 function layoutFrames() {
@@ -213,13 +214,37 @@ function layoutFrames() {
   }
 }
 
-function drawStageBg(ctx, W, H, sc) {
+// サンプル用の人形（道着と袴）。撮影した動画の代わりに、骨格の点から描く
+function paintMannequin(g, k, view, s) {
+  const P = (p, dx = 0, dy = 0) => [(p.x + dx) * s, (p.y + dy) * s];
+  const cap = (a, b, w, col) => { g.strokeStyle = col; g.lineWidth = w * s; g.lineCap = 'round'; g.beginPath(); g.moveTo(...P(a)); g.lineTo(...P(b)); g.stroke(); };
+  const poly = (pts, col) => { g.fillStyle = col; g.beginPath(); pts.forEach((q, i) => (i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1]))); g.closePath(); g.fill(); };
+  const ell = (c, rx, ry, col, a0 = 0, a1 = Math.PI * 2) => { g.fillStyle = col; g.beginPath(); g.ellipse(c.x * s, c.y * s, rx * s, ry * s, 0, a0, a1); g.fill(); };
+  const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  const SKIN = '#e2ba96', WHITE = '#eeeee8', SLEEVE = '#e4e4de', BLACK = '#1c1c22', HAIR = '#141210', GLOVE = '#966e46';
+  const ls = k[5], rs = k[6], lh = k[11], rh = k[12], la = k[15], ra = k[16];
+  const wide = view === 'front' ? 12 : 28, foot = view === 'front' ? 28 : 40;
+  poly([P(lh, wide, -8), P(rh, -wide, -8), P(ra, -foot, 12), P(la, foot, 12)], BLACK); // 袴
+  cap(k[13], la, 32, BLACK); cap(k[14], ra, 32, BLACK); cap(lh, k[13], 40, BLACK); cap(rh, k[14], 40, BLACK);
+  if (view === 'front') poly([P(ls, 8, -8), P(rs, -8, -8), P(rh, -4, 0), P(lh, 4, 0)], WHITE);
+  else { const cx = (ls.x + rs.x) / 2, hx = (lh.x + rh.x) / 2; poly([[(cx + 40) * s, (ls.y - 8) * s], [(cx - 40) * s, (rs.y - 8) * s], [(hx - 36) * s, rh.y * s], [(hx + 36) * s, lh.y * s]], WHITE); }
+  ell({ x: la.x, y: la.y + 4 }, 18, 11, WHITE); ell({ x: ra.x, y: ra.y + 4 }, 18, 11, WHITE); // 足袋
+  cap(ls, k[7], 26, WHITE); cap(k[7], k[9], 22, SLEEVE); cap(rs, k[8], 26, WHITE); cap(k[8], k[10], 22, SLEEVE);
+  ell(k[9], 14, 14, SKIN); ell(k[10], 14, 14, GLOVE);
+  const nk = mid(ls, rs), hc = { x: (k[3].x + k[4].x) / 2, y: (k[3].y + k[4].y) / 2 - 8 };
+  cap(nk, { x: hc.x, y: hc.y + 20 }, 24, SKIN);
+  ell(hc, 34, 40, SKIN); ell({ x: hc.x, y: hc.y - 4 }, 36, 38, HAIR, Math.PI, Math.PI * 2);
+  ell(k[1], 4, 4, '#1e1e1e'); ell(k[2], 4, 4, '#1e1e1e'); ell(k[0], 4, 4, '#be8c6e');
+}
+// サンプルの「撮影場所」: 道場の壁と床
+function drawStageBg(ctx, W, H, sc, noLabel) {
   const floorY = 1112 * sc;
   const g = ctx.createLinearGradient(0, 0, 0, H);
-  g.addColorStop(0, '#1c2026'); g.addColorStop(floorY / H, '#14171b'); g.addColorStop(Math.min(1, floorY / H + 0.001), '#4a3d2c'); g.addColorStop(1, '#2d251b');
+  g.addColorStop(0, '#a39a86'); g.addColorStop(floorY / H, '#8f8672'); g.addColorStop(Math.min(1, floorY / H + 0.001), '#7a5c3c'); g.addColorStop(1, '#5e462d');
   ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
-  ctx.strokeStyle = 'rgba(255,230,190,.08)'; ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(40,25,10,.18)'; ctx.lineWidth = 1;
   for (let y = floorY + 14 * sc; y < H; y += 26 * sc) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  if (noLabel) return;
   ctx.fillStyle = 'rgba(255,255,255,.38)'; ctx.font = `${Math.round(11 * dpr)}px ${getComputedStyle(document.body).fontFamily}`;
   ctx.textAlign = 'right'; ctx.fillText('合成サンプル', W - 8 * dpr, H - 8 * dpr); ctx.textAlign = 'left';
 }
@@ -229,7 +254,7 @@ function drawView(v) {
   ctx.clearRect(0, 0, W, H);
   if (!v.w || v.pane.hidden) { v.hudPhase.textContent = ''; v.hudVal.textContent = ''; return; }
   const sc = W / v.w;
-  if (v.sampleBg) drawStageBg(ctx, W, H, sc);
+  if (v.sampleBg) { drawStageBg(ctx, W, H, sc); const km = v.track && K.kpAt(v.track, viewTime(v.key, S.t)); if (km) paintMannequin(ctx, km, v.key, sc); }
   else if (v.flip && !v.url) drawFlip(ctx, v, viewTime(v.key, S.t), W, H);
   else if (!v.url && v.track) { ctx.fillStyle = '#0e1013'; ctx.fillRect(0, 0, W, H); }
   const lw = Math.max(2, W / 170);
@@ -450,6 +475,85 @@ function makeCam(W, H) {
 }
 function setCamPressed(key) { $$('#pane-top .cam button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.cam === key))); }
 
+// 撮影した動画を、撮った向きの面に半透明で貼る。正面の動画は体の正面の面（z=0）、馬手側の動画は横の面（x=0）
+const VID = { on: store.get('vidOn') !== '0', alpha: clamp(Number(store.get('vidAlpha')) || 0.55, 0.1, 1) };
+const sampleCv = {};
+function frameSource(v) {
+  if (!v.track || !v.w || !v.h) return null;
+  const tv = viewTime(v.key, S.t);
+  if (v.sampleBg) {
+    let c = sampleCv[v.key];
+    if (!c) { c = sampleCv[v.key] = document.createElement('canvas'); c.width = Math.round(v.w / 2); c.height = Math.round(v.h / 2); }
+    const g = c.getContext('2d'), s = c.width / v.w;
+    drawStageBg(g, c.width, c.height, s, true);
+    const k = K.kpAt(v.track, tv); if (k) paintMannequin(g, k, v.key, s);
+    return { img: c, ox: 0, oy: 0, sx: s, sy: s };
+  }
+  const vid = v.video;
+  if (v.url && vid.readyState >= 2 && vid.videoWidth) return { img: vid, ox: 0, oy: 0, sx: vid.videoWidth / v.w, sy: vid.videoHeight / v.h };
+  const f = v.flip;
+  if (f && f.order.length) {
+    const o = f.order; let lo = 0, hi = o.length - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (o[m].t <= tv) lo = m; else hi = m; }
+    const pick = Math.abs(o[hi].t - tv) < Math.abs(o[lo].t - tv) ? o[hi] : o[lo];
+    const tl = f.tile, im = f.imgs[Math.floor(pick.i / tl.per)], idx = pick.i % tl.per;
+    if (!im || !im.complete || !im.naturalWidth) return null;
+    return { img: im, ox: (idx % tl.cols) * tl.w, oy: Math.floor(idx / tl.cols) * tl.h, sx: tl.w / v.w, sy: tl.h / v.h };
+  }
+  return null;
+}
+// 画像の三角形を、画面の三角形へ写す（遠近は細かく分けた三角形で近似）
+function texTri(ctx, img, a, b, c, iw, ih) {
+  const den = (b.u - a.u) * (c.v - a.v) - (c.u - a.u) * (b.v - a.v);
+  if (Math.abs(den) < 1e-9) return;
+  const m11 = ((b.x - a.x) * (c.v - a.v) - (c.x - a.x) * (b.v - a.v)) / den;
+  const m12 = ((b.y - a.y) * (c.v - a.v) - (c.y - a.y) * (b.v - a.v)) / den;
+  const m21 = ((c.x - a.x) * (b.u - a.u) - (b.x - a.x) * (c.u - a.u)) / den;
+  const m22 = ((c.y - a.y) * (b.u - a.u) - (b.y - a.y) * (c.u - a.u)) / den;
+  const e = a.x - m11 * a.u - m21 * a.v, f = a.y - m12 * a.u - m22 * a.v;
+  const cx = (a.x + b.x + c.x) / 3, cy = (a.y + b.y + c.y) / 3;
+  const grow = (p) => { const dx = p.x - cx, dy = p.y - cy, L = Math.hypot(dx, dy) || 1; return [p.x + dx / L * 0.9, p.y + dy / L * 0.9]; };
+  ctx.save();
+  ctx.beginPath(); ctx.moveTo(...grow(a)); ctx.lineTo(...grow(b)); ctx.lineTo(...grow(c)); ctx.closePath(); ctx.clip();
+  ctx.setTransform(m11, m12, m21, m22, e, f);
+  const u0 = clamp(Math.floor(Math.min(a.u, b.u, c.u)) - 1, 0, iw - 1), v0 = clamp(Math.floor(Math.min(a.v, b.v, c.v)) - 1, 0, ih - 1);
+  const u1 = clamp(Math.ceil(Math.max(a.u, b.u, c.u)) + 1, u0 + 1, iw), v1 = clamp(Math.ceil(Math.max(a.v, b.v, c.v)) + 1, v0 + 1, ih);
+  try { ctx.drawImage(img, u0, v0, u1 - u0, v1 - v0, u0, v0, u1 - u0, v1 - v0); } catch (err) { /* 読み込み途中のコマ */ }
+  ctx.restore();
+}
+function drawVideoPlanes(ctx, pr, dir) {
+  const fz = S.fz, planes = [];
+  let any = false;
+  for (const key of ['front', 'side']) {
+    const v = V[key], src = frameSource(v);
+    if (!src) continue;
+    any = true;
+    const facing = Math.abs(dir(key === 'front' ? { x: 0, y: 0, z: 1 } : { x: 1, y: 0, z: 0 }).d);
+    const a = VID.alpha * Math.pow(clamp((facing - 0.12) / 0.88, 0, 1), 1.2);
+    if (a < 0.02) continue;
+    const toW = key === 'front'
+      ? (px, py) => ({ x: (px - fz.oF.x) * fz.cppF * fz.sT, y: (fz.oF.y - py) * fz.cppF, z: 0 })
+      : (px, py) => ({ x: 0, y: (fz.oS.y - py) * fz.cppS, z: (px - fz.oS.x) * fz.cppS * fz.sF });
+    planes.push({ v, src, a, facing, toW });
+  }
+  planes.sort((p, q) => p.facing - q.facing);
+  for (const { v, src, a, toW } of planes) {
+    const N = 5, iw = src.img.videoWidth || src.img.naturalWidth || src.img.width, ih = src.img.videoHeight || src.img.naturalHeight || src.img.height;
+    const pts = [];
+    for (let j = 0; j <= N; j++) {
+      const row = [];
+      for (let i = 0; i <= N; i++) { const px = v.w * i / N, py = v.h * j / N, P = pr(toW(px, py)); row.push({ x: P.x, y: P.y, u: src.ox + px * src.sx, v: src.oy + py * src.sy }); }
+      pts.push(row);
+    }
+    ctx.save(); ctx.globalAlpha = a;
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      texTri(ctx, src.img, pts[j][i], pts[j][i + 1], pts[j + 1][i + 1], iw, ih);
+      texTri(ctx, src.img, pts[j][i], pts[j + 1][i + 1], pts[j + 1][i], iw, ih);
+    }
+    ctx.restore();
+  }
+  return { any, shown: planes.length };
+}
 function drawTop() {
   if (TOP.pane.hidden) return;
   const c = TOP.canvas, ctx = c.getContext('2d'), W = c.width, H = c.height;
@@ -461,6 +565,7 @@ function drawTop() {
   const lw = Math.max(2, W / 170);
   const font = getComputedStyle(document.body).fontFamily;
   const below = CAM.pitch < 0;
+  const vinfo = S.fz && VID.on ? drawVideoPlanes(ctx, pr, dir) : null;
   // 床（射場の板）と 20cm の目盛り
   const fq = [[-110, -90], [130, -90], [130, 90], [-110, 90]].map(([x, z]) => pr({ x, y: 0, z }));
   ctx.fillStyle = below ? 'rgba(255,255,255,.02)' : 'rgba(255,236,205,.045)';
@@ -470,6 +575,10 @@ function drawTop() {
   for (let x = -110; x <= 130; x += 20) gl({ x, y: 0, z: -90 }, { x, y: 0, z: 90 });
   for (let z = -90; z <= 90; z += 20) gl({ x: -110, y: 0, z }, { x: 130, y: 0, z });
   drawGizmo(ctx, dir, W, H, font);
+  if (vinfo && vinfo.any && !vinfo.shown) {
+    ctx.font = `${Math.round(11.5 * dpr)}px ${font}`; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; ctx.fillStyle = 'rgba(255,255,255,.6)';
+    ctx.fillText('動画は 斜め・正面・馬手側 から見ると重なります', W / 2, H - 12 * dpr); ctx.textAlign = 'left';
+  }
   if (!S.fz) {
     TOP.msg.hidden = false;
     TOP.msg.textContent = V.front.track && V.side.track ? '2本の動画を立体に組み立てられませんでした。「区切りと時刻合わせを直す」で時刻のずれを合わせてください。' : (V.front.track || V.side.track ? '立体の図は、正面と馬手側の両方を解析すると表示されます。' : '正面と馬手側の動画を解析すると、2方向を合成して立体で見られます。');
@@ -591,6 +700,12 @@ function drawGizmo(ctx, dir, W, H, font) {
     ctx.fillStyle = a.c; ctx.fillText(a.n, o.x + a.v.x * (L + 9 * dpr), o.y - a.v.y * (L + 9 * dpr));
   }
   ctx.globalAlpha = 1; ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+}
+{
+  const on = $('#vidOn'), al = $('#vidAlpha');
+  on.checked = VID.on; al.value = Math.round(VID.alpha * 100); al.disabled = !VID.on;
+  on.addEventListener('change', () => { VID.on = on.checked; al.disabled = !VID.on; store.set('vidOn', VID.on ? '1' : '0'); drawTop(); });
+  al.addEventListener('input', () => { VID.alpha = clamp(Number(al.value) / 100, 0.1, 1); store.set('vidAlpha', String(VID.alpha)); drawTop(); });
 }
 $$('#pane-top .cam button').forEach(b => b.addEventListener('click', () => {
   [CAM.yaw, CAM.pitch] = CAM_PRESETS[b.dataset.cam]; CAM.zoom = 1;
@@ -750,18 +865,18 @@ $('#nextPhase').addEventListener('click', () => {
   const b = S.ph.bounds; const i = K.phaseAt(b, S.t);
   setTime(b[clamp(i + 1, 0, 8)] + (i + 1 >= 8 ? -0.01 : 0.01));
 });
-$$('.rate button').forEach(b => b.addEventListener('click', () => {
+$$('#viewer .rate button').forEach(b => b.addEventListener('click', () => {
   S.rate = Number(b.dataset.rate);
-  $$('.rate button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  $$('#viewer .rate button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
   for (const v of Object.values(V)) if (videoActive(v)) v.video.playbackRate = S.rate;
 }));
-$$('.viewbar .seg button').forEach(b => b.addEventListener('click', () => setLayout(b.dataset.layout)));
-$$('.tog').forEach(b => {
+$$('#viewer .viewbar .seg button').forEach(b => b.addEventListener('click', () => setLayout(b.dataset.layout)));
+$$('#viewer .tog').forEach(b => {
   b.setAttribute('aria-pressed', String(!!S.layers[b.dataset.layer]));
   b.addEventListener('click', () => { const k = b.dataset.layer; S.layers[k] = !S.layers[k]; b.setAttribute('aria-pressed', String(S.layers[k])); drawAll(); });
 });
 for (const v of Object.values(V)) {
-  v.video.addEventListener('seeked', () => { if (!S.busy) drawView(v); });
+  v.video.addEventListener('seeked', () => { if (!S.busy) { drawView(v); if (!TOP.pane.hidden) drawTop(); } });
   v.canvas.addEventListener('click', (e) => {
     if (v.status !== 'ready') return;
     const r = v.canvas.getBoundingClientRect();
@@ -1148,7 +1263,7 @@ async function onVideoFile(key, file) {
     await seekTo(vid, Math.min(0.1, v.duration / 2));
     v.status = 'ready';
     S.layout = 'both';
-    $$('.viewbar .seg button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.layout === 'both')));
+    $$('#viewer .viewbar .seg button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.layout === 'both')));
   } catch (e) {
     v.status = 'error'; v.error = 'この動画は読み込めませんでした。MP4（H.264）か MOV で試してください。';
   }
@@ -1257,7 +1372,7 @@ const toKp = (k) => { const o = []; for (let j = 0; j < 17; j++) o.push({ x: k[j
 async function startAnalysis(keys) {
   if (S.busy) return;
   pause();
-  S.busy = true; cancelFlag = false;
+  S.busy = true; cancelFlag = false; syncModeBtns();
   for (const key of keys) {
     const v = V[key];
     if (v.status !== 'ready') continue;
@@ -1304,7 +1419,7 @@ async function startAnalysis(keys) {
     }
     if (cancelFlag) break;
   }
-  S.busy = false; cancelFlag = false;
+  S.busy = false; cancelFlag = false; syncModeBtns();
   recompute(true);
   const M = masterTrack();
   if (S.fz) { CAM.yaw = 0; CAM.pitch = 90; CAM.zoom = 1; setCamPressed('top'); setLayout('3d'); }
@@ -1436,7 +1551,7 @@ function makeFlip(p, frames, shotId) {
   const order = frames.map(f => ({ t: f.t, i: f.i })).sort((a, b) => a.t - b.t);
   const imgs = p.sheets.map(id => {
     const im = new Image();
-    im.onload = () => drawAll();
+    im.onload = () => { drawAll(); drawTeAll(); };
     blobUrl(shotId, id).then(u => { im.src = u; }).catch(() => { /* 画像なしで骨格だけ表示 */ });
     return im;
   });
@@ -1482,8 +1597,9 @@ async function login(key, name, silent) {
 }
 function logout() {
   clearTimeout(SH.pollT); clearTimeout(SH.listT);
-  SH.key = ''; store.set('key', ''); SH.db = null; SH.role = null; SH.shots = []; SH.listState = 'off';
-  SH.declinedAuto = true; SH.msg = '';
+  SH.key = ''; store.set('key', ''); SH.db = null; SH.role = null; SH.shots = []; HR.list = []; SH.listState = 'off';
+  SH.declinedAuto = true; HR.declinedAuto = true; SH.msg = '';
+  if (HR.id) selectHand(null);
   if (SH.shotId) selectShot(null); else renderShotBar();
   renderCoach();
 }
@@ -1501,25 +1617,31 @@ async function pollTick() {
   if (!SH.db) return;
   try {
     if (Date.now() - lastList > 20000) await pollList(false);
-    if (SH.shotId) await pollShot();
+    if (SH.shotId) { try { await pollShot(); } catch (e) { if (e.code !== 'not_found') throw e; SH.msg = 'この射の記録は消されました。'; selectShot(null); } }
+    if (HR.id) { try { await pollHand(); } catch (e) { if (e.code !== 'not_found') throw e; SH.msg = 'この手の記録は消されました。'; selectHand(null); } }
     if (SH.fails) { SH.fails = 0; if (SH.msg.startsWith('サーバー')) SH.msg = ''; renderShotBar(); }
   } catch (e) {
     SH.fails++;
     if (e.code === 'bad_key') { logout(); SH.msg = '合言葉が変わりました。入れ直してください。'; renderShotBar(); return; }
-    if (e.code === 'not_found' && SH.shotId) { SH.msg = 'この射の記録は消されました。'; selectShot(null); }
-    else if (SH.fails >= 2) { SH.msg = e.message; renderShotBar(); }
+    if (SH.fails >= 2) { SH.msg = e.message; renderShotBar(); }
   }
   schedulePoll();
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && SH.db) { clearTimeout(SH.pollT); pollTick(); } });
 async function pollList(first) {
-  const prev = new Set(SH.shots.map(s => s.id));
+  const prev = new Set(SH.shots.map(s => s.id)), prevH = new Set(HR.list.map(s => s.id));
   const r = await api('list');
   lastList = Date.now();
-  SH.shots = r.shots || [];
+  const all = r.shots || [];
+  SH.shots = all.filter(s => s.type !== 'hand');
+  HR.list = all.filter(s => s.type === 'hand');
   SH.listState = 'ok';
+  const fresh = (s) => Date.now() - (s.createdAt || 0) < 12 * 3600e3;
+  const nh = HR.list[0];
+  if (nh && !HR.id && !HR.declinedAuto && !S.busy && !anyTeWork() && fresh(nh)) selectHand(nh.id);
+  else if (nh && HR.id && nh.id !== HR.id && !first && !prevH.has(nh.id) && nh.createdBy !== SH.uid) HR.newer = nh.id;
   const newest = SH.shots[0];
-  if (newest && !SH.shotId && !SH.declinedAuto && !S.busy && (S.sample || !anyLocalWork()) && Date.now() - (newest.createdAt || 0) < 12 * 3600e3) { selectShot(newest.id); return; }
+  if (newest && !SH.shotId && !SH.declinedAuto && !S.busy && (S.sample || !anyLocalWork()) && fresh(newest)) { selectShot(newest.id); return; }
   if (newest && SH.shotId && newest.id !== SH.shotId && !first && !prev.has(newest.id) && newest.createdBy !== SH.uid) SH.newer = newest.id;
   renderShotBar();
 }
@@ -1547,7 +1669,7 @@ function selectShot(id) {
   SH.shotId = id; SH.shot = null; SH.updatedAt = 0; SH.newer = null; SH.confirmDel = false;
   pause(); resetViews();
   if (!id) { loadSample(); renderShotBar(); renderCoach(); return; }
-  S.sample = false; $('#sampleBanner').hidden = true;
+  S.sample = false; syncBanner();
   setLayout(S.layout); renderAll(); renderCoach();
   clearTimeout(SH.pollT);
   pollShot().catch(e => { SH.msg = e.message; renderShotBar(); }).finally(schedulePoll);
@@ -1723,6 +1845,7 @@ function whoText(id) {
 function fmtShot(s) { return (s.title || '射') + (s.memo ? `（${s.memo}）` : ''); }
 const ROLE_NAME = { view: '閲覧のみ', edit: '登録できます', admin: '管理者' };
 function renderShotBar() {
+  syncModeBtns();
   const bar = $('#shotbar');
   if (!API_URL) {
     bar.hidden = false;
@@ -1740,35 +1863,43 @@ function renderShotBar() {
     return;
   }
   $('#whoami').textContent = `${SH.club ? SH.club + '・' : ''}${SH.name || '名無し'}（${ROLE_NAME[SH.role] || ''}）`;
+  const te = uiMode === 'te';
+  const curId = te ? HR.id : SH.shotId, cur = te ? HR.rec : SH.shot, list = te ? HR.list : SH.shots, confirm = te ? HR.confirmDel : SH.confirmDel;
+  $('#shotLbl').textContent = te ? '手の記録' : '射の記録';
   const sel = $('#shotSel');
-  const opts = [['', 'サンプル（合成データ）']].concat(SH.shots.map(s => [s.id, fmtShot(s)]));
-  if (SH.shotId && !SH.shots.some(s => s.id === SH.shotId) && SH.shot) opts.splice(1, 0, [SH.shotId, fmtShot(SH.shot)]);
+  sel.setAttribute('aria-label', te ? '手の記録を選ぶ' : '射の記録を選ぶ');
+  const opts = [['', 'サンプル（合成データ）']].concat(list.map(s => [s.id, fmtShot(s.id === curId && cur ? cur : s)]));
+  if (curId && !list.some(s => s.id === curId) && cur) opts.splice(1, 0, [curId, fmtShot(cur)]);
   sel.textContent = '';
   for (const [v, l] of opts) { const o = document.createElement('option'); o.value = v; o.textContent = l; sel.appendChild(o); }
-  sel.value = SH.shotId || '';
+  sel.value = curId || '';
   sel.disabled = S.busy;
   const ro = SH.writeBlocked || !SH.canWrite;
-  $('#newShot').hidden = ro;
+  const nb = $('#newShot'); nb.hidden = ro; nb.textContent = te ? '＋ 新しい記録' : '＋ 新しい射';
   const memo = $('#shotMemo');
-  memo.hidden = !SH.shotId;
-  memo.disabled = ro || !SH.shotId;
-  if (document.activeElement !== memo) memo.value = (SH.shot && SH.shot.memo) || '';
-  $('#delShot').hidden = !(SH.shotId && SH.canEdit) || SH.confirmDel;
-  $('#delConfirm').hidden = !SH.confirmDel;
+  memo.hidden = !curId;
+  memo.disabled = ro || !curId;
+  if (document.activeElement !== memo) memo.value = (cur && cur.memo) || '';
+  const del = $('#delShot');
+  del.hidden = !(curId && SH.canEdit) || confirm;
+  del.textContent = te ? 'この手の記録を消す' : 'この射の記録を消す';
+  $('#delConfirm').hidden = !confirm;
+  $('#delWhat').textContent = te ? '弓手・馬手の結果と映像がすべて消えます。' : '動画の結果・写真・印がすべて消えます。';
   const notes = [];
   if (SH.listState === 'loading') notes.push('記録を読み込んでいます…');
   if (SH.msg) notes.push(SH.msg);
   if (ro && !SH.msg) notes.push('閲覧のみの合言葉です。ここで解析した結果は共有されません。');
-  if (!SH.shotId && !ro) notes.push('動画か写真を選ぶと新しい射の記録ができ、合言葉を知っている人に届きます。');
-  if (SH.shotId && !ro && SH.shot) {
-    const filled = ['front', 'side'].filter(k => SH.shot.parts && SH.shot.parts[k]).length + (SH.shot.target ? 1 : 0);
-    notes.push(filled < 3 ? '正面・馬手側・矢所を、撮った人がそれぞれの端末から登録できます。' : '3つとも登録されました。');
+  if (!curId && !ro) notes.push(te ? '接写の動画を選ぶと新しい手の記録ができ、合言葉を知っている人に届きます。' : '動画か写真を選ぶと新しい射の記録ができ、合言葉を知っている人に届きます。');
+  if (curId && !ro && cur) {
+    if (te) { const filled = TKEYS.filter(k => cur.parts && cur.parts[k]).length; notes.push(filled < 2 ? '弓手・馬手を、撮った人がそれぞれの端末から登録できます。' : '2つとも登録されました。'); }
+    else { const filled = ['front', 'side'].filter(k => cur.parts && cur.parts[k]).length + (cur.target ? 1 : 0); notes.push(filled < 3 ? '正面・馬手側・矢所を、撮った人がそれぞれの端末から登録できます。' : '3つとも登録されました。'); }
   }
   $('#shotNote').textContent = notes.join(' ');
   const nw = $('#shotNewer');
-  const ns = SH.newer && SH.shots.find(s => s.id === SH.newer);
+  const nid = te ? HR.newer : SH.newer;
+  const ns = nid && list.find(s => s.id === nid);
   nw.hidden = !ns;
-  if (ns) $('#shotNewerText').textContent = `新しい射「${fmtShot(ns)}」が作られました。`;
+  if (ns) { $('#shotNewerText').textContent = `新しい${te ? '手の記録' : '射'}「${fmtShot(ns)}」が作られました。`; $('#shotGo').textContent = te ? 'その記録へ移る' : 'その射へ移る'; }
 }
 function renderCoach() {
   const box = $('#coachBox'); if (!box) return;
@@ -1786,13 +1917,21 @@ function renderCoach() {
   b.textContent = SH.coachBusy ? '講評を作っています…' : (c ? '講評を作り直す' : 'AIの講評を作る');
   if (!SH.coachBusy) $('#coachMsg').textContent = canMake ? `今日あと ${SH.aiLeft} 回` : '';
 }
-$('#shotSel').addEventListener('change', (e) => { const id = e.target.value || null; if (!id) SH.declinedAuto = true; SH.msg = ''; selectShot(id); });
-$('#newShot').addEventListener('click', async () => { if (S.busy) return; SH.msg = ''; await createShot(); });
-$('#shotMemo').addEventListener('change', (e) => { const m = e.target.value.slice(0, 60); if (SH.shot) { SH.shot = { ...SH.shot, memo: m }; shareShot({ memo: m }); } });
-$('#delShot').addEventListener('click', () => { SH.confirmDel = true; renderShotBar(); });
-$('#delNo').addEventListener('click', () => { SH.confirmDel = false; renderShotBar(); });
-$('#delYes').addEventListener('click', () => { SH.confirmDel = false; deleteShot(); });
-$('#shotGo').addEventListener('click', () => { if (SH.newer) selectShot(SH.newer); });
+$('#shotSel').addEventListener('change', (e) => {
+  const id = e.target.value || null; SH.msg = '';
+  if (uiMode === 'te') { if (!id) HR.declinedAuto = true; selectHand(id); }
+  else { if (!id) SH.declinedAuto = true; selectShot(id); }
+});
+$('#newShot').addEventListener('click', async () => { if (S.busy) return; SH.msg = ''; if (uiMode === 'te') await createHand(); else await createShot(); });
+$('#shotMemo').addEventListener('change', (e) => {
+  const m = e.target.value.slice(0, 60);
+  if (uiMode === 'te') { if (HR.rec) { HR.rec = { ...HR.rec, memo: m }; shareHand({ memo: m }); } }
+  else if (SH.shot) { SH.shot = { ...SH.shot, memo: m }; shareShot({ memo: m }); }
+});
+$('#delShot').addEventListener('click', () => { if (uiMode === 'te') HR.confirmDel = true; else SH.confirmDel = true; renderShotBar(); });
+$('#delNo').addEventListener('click', () => { HR.confirmDel = false; SH.confirmDel = false; renderShotBar(); });
+$('#delYes').addEventListener('click', () => { const te = uiMode === 'te'; HR.confirmDel = false; SH.confirmDel = false; if (te) deleteHand(); else deleteShot(); });
+$('#shotGo').addEventListener('click', () => { if (uiMode === 'te') { if (HR.newer) selectHand(HR.newer); } else if (SH.newer) selectShot(SH.newer); });
 $('#loginForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const k = $('#loginKey').value.trim(), n = $('#loginName').value.trim().slice(0, 20);
@@ -1805,6 +1944,102 @@ $('#loginForm').addEventListener('submit', (e) => {
 $('#logout').addEventListener('click', logout);
 $('#coachBtn').addEventListener('click', makeCoach);
 
+// ---- 手の内・ひねりの記録（GAS 版）。同じ表に type:'hand' の行として置く ----
+const HR = { id: null, rec: null, updatedAt: 0, unsub: [], newer: null, declinedAuto: false, confirmDel: false, list: [], patch: null, timer: 0 };
+const canShareTe = () => !!(SH.db && HR.id && !SH.writeBlocked && SH.canWrite);
+const canCreateTe = () => !!(SH.db && !SH.writeBlocked && SH.canWrite);
+async function createHand() {
+  if (!canCreateTe()) return false;
+  try {
+    const r = await track(api('create', { type: 'hand', name: SH.name, dev: SH.uid }));
+    HR.list.unshift({ id: r.shot.id, type: 'hand', title: r.shot.title, memo: '', createdAt: r.shot.createdAt, createdBy: SH.uid, parts: [] });
+    HR.declinedAuto = false; selectHand(r.shot.id);
+    return true;
+  } catch (e) { writeError(e); return false; }
+}
+function selectHand(id) {
+  if (S.busy) return;
+  HR.id = id; HR.rec = null; HR.updatedAt = 0; HR.newer = null; HR.confirmDel = false;
+  tePause(); resetTe();
+  if (!id) { loadTeSample(); renderTe(); renderShotBar(); return; }
+  renderTe(); renderShotBar();
+  clearTimeout(SH.pollT);
+  pollHand().catch(e => { SH.msg = e.message; renderShotBar(); }).finally(schedulePoll);
+}
+async function pollHand() {
+  const id = HR.id;
+  if (!id || SH.pending || HR.patch) return;
+  const r = await api('get', { id, since: HR.updatedAt || 0 });
+  if (HR.id !== id || r.unchanged || SH.pending || HR.patch) return;
+  await applyHand(r.shot);
+}
+async function applyHand(rec) {
+  const id = HR.id;
+  const before = JSON.stringify((HR.rec && HR.rec.rel) || {});
+  HR.rec = rec; HR.updatedAt = rec.updatedAt;
+  if (rec.createdBy && rec.createdBy.dev) SH.names[rec.createdBy.dev] = rec.createdBy.name;
+  const had = teActive().length > 0;
+  let changed = false;
+  for (const key of TKEYS) {
+    const p = rec.parts && rec.parts[key], s = TV[key];
+    if (!p) continue;
+    if (p.dev) SH.names[p.dev] = p.by;
+    if (s.partAt === p.at && s.partShot === id) { if (s.by !== p.dev) { s.by = p.dev; changed = true; } continue; }
+    if (S.busy && s.status === 'analyzing') continue;
+    try {
+      const r = await api('getPart', { id, kind: key });
+      if (HR.id !== id) return;
+      teLoadPart(key, p, teDecode(key, r.frames), id);
+      changed = true;
+    } catch (e) { console.warn(e); SH.msg = e.message; }
+  }
+  if (changed) { recomputeTe(true); if (!had) TE.rel = -0.3; TE.rel = clamp(TE.rel, ...relRange()); renderTe(); }
+  else if (JSON.stringify(rec.rel || {}) !== before && teActive().length) { recomputeTe(false); renderTe(); }
+  else renderShotBar();
+}
+function shareHand(patch) {
+  if (!canShareTe()) return;
+  HR.patch = Object.assign(HR.patch || {}, patch);
+  clearTimeout(HR.timer);
+  const id = HR.id;
+  HR.timer = setTimeout(() => {
+    const body = HR.patch; HR.patch = null;
+    SH.shotChain = SH.shotChain.then(() => track(api('updateShot', { id, patch: body }))).catch(writeError);
+  }, 600);
+}
+async function shareTePart(key, s, frames, thumbs) {
+  if (!canShareTe()) return;
+  const hid = HR.id;
+  SH.pending++;
+  try {
+    SH.msg = `${s.label}の結果を共有しています…`; renderShotBar();
+    let sheets = s.sheets || [], tile = s.tile || null;
+    if (thumbs) {
+      sheets = []; tile = null;
+      try {
+        const blobs = (await thumbs.finish()).filter(Boolean);
+        for (let i = 0; i < blobs.length; i++) { SH.msg = `${s.label}のコマ画像を送っています（${i + 1}/${blobs.length}）…`; renderShotBar(); sheets.push(await uploadBlob(hid, blobs[i], `${key}-sheet${i}`)); }
+        if (sheets.length) tile = { w: thumbs.tw, h: thumbs.th, cols: thumbs.cols, per: thumbs.per };
+      } catch (e) { console.warn(e); sheets = []; tile = null; }
+    }
+    const h = s.ph ? s.ph.tHanare : NaN;
+    let fr = frames.slice(), ef = teEncode(key, fr);
+    while (ef.k.length > 1200000 && fr.length > 20) { fr = fr.filter((f, j) => j % 2 === 0 || (Number.isFinite(h) && Math.abs(f.t - h) < 0.6)); ef = teEncode(key, fr); }
+    if (HR.id !== hid) return;
+    const r = await api('putPart', { id: hid, kind: key, name: SH.name, dev: SH.uid, frames: { t: ef.t, k: ef.k, p: ef.p, ti: ef.ti }, meta: { w: s.w, h: s.h, duration: s.duration, n: ef.n, fps: s.fps, slow: s.slow, sheets, tile } });
+    s.partAt = r.at; s.partShot = hid; s.by = SH.uid; s.sheets = sheets; s.tile = tile; SH.names[SH.uid] = SH.name;
+    SH.msg = '';
+  } catch (e) { writeError(e); }
+  finally { SH.pending--; }
+  renderShotBar(); renderTeSlots();
+}
+async function deleteHand() {
+  const id = HR.id; if (!id) return;
+  try { await track(api('deleteShot', { id })); } catch (e) { writeError(e); return; }
+  HR.list = HR.list.filter(s => s.id !== id);
+  HR.declinedAuto = true; selectHand(null);
+}
+
 // ---------- 設定 ----------
 const hIn = $('#height'); hIn.value = S.heightCm;
 hIn.addEventListener('change', () => { const v = Number(hIn.value); if (v >= 120 && v <= 210) { S.heightCm = v; store.set('height', v); shareShot({ heightCm: v }); recompute(false); } else hIn.value = S.heightCm; });
@@ -1815,9 +2050,906 @@ $('#in-front').addEventListener('change', (e) => { onVideoFile('front', e.target
 $('#in-side').addEventListener('change', (e) => { onVideoFile('side', e.target.files[0]); e.target.value = ''; });
 $('#in-photo').addEventListener('change', (e) => { onPhotoFile(e.target.files[0]); e.target.value = ''; });
 
+// ---------- 手の内・ひねりモード（弓手と馬手の接写） ----------
+const TE = { view: 'both', rel: 0, playing: false, rate: 0.25, zoom: true, sample: true, layers: { skel: true, guide: true, trail: true }, spacingCm: clamp(Number(store.get('spacing')) || 5, 2, 12) };
+const TKEYS = ['yunde', 'mete'];
+const MK = [{ name: '黄', note: '甲・人差し指側', col: '#f5c542' }, { name: '青', note: '甲・小指側', col: '#3d8bff' }, { name: '緑', note: '手首', col: '#62c43a' }];
+const TGROUPS = [['y_kai', '弓手・会', '引き収めた時の形'], ['y_hanare', '弓手・離れ', '離れの前後の変化'], ['m_kai', '馬手・会', '引き収めた時の捻り'], ['m_hanare', '馬手・離れ', '離れの前後の動き']];
+function mkSlot(key, label) {
+  const pane = $('#pane-' + key);
+  return {
+    key, label, pane, frame: $('.frame', pane), video: $('video', pane), canvas: $('canvas.ov', pane), hudPhase: $('.hud-phase', pane), hudVal: $('.hud-val', pane),
+    msg: $('.pane-msg', pane), ctl: $('.te-ctl', pane), prog: $('.pane-prog', pane), slot: $('#slot-' + key), slowSel: $('#slow-' + key),
+    file: null, url: null, track: null, ph: null, phAuto: null, manualT: null, metrics: [], status: 'empty', progress: 0, w: 0, h: 0, duration: 0, slow: 1, fps: 30,
+    pick: null, marks: [], calT: null, liveK: null, flip: null, sampleBg: false, stage: null, partAt: null, partShot: null, by: null, thumbs: null, sheets: null, tile: null, error: ''
+  };
+}
+const TV = { yunde: mkSlot('yunde', '弓手'), mete: mkSlot('mete', '馬手') };
+const tH = (s) => (s.ph ? s.ph.tHanare : 0);
+const realOf = (s, rel = TE.rel) => tH(s) + rel;
+const anyTeWork = () => !TE.sample && Object.values(TV).some(s => s.status !== 'empty');
+const teActive = () => TKEYS.map(k => TV[k]).filter(s => s.track);
+function relRange() {
+  let lo = Infinity, hi = -Infinity;
+  for (const s of teActive()) { lo = Math.min(lo, s.track.grid.t0 - tH(s)); hi = Math.max(hi, s.duration / s.slow - tH(s)); }
+  return Number.isFinite(lo) ? [lo, hi] : [0, 0];
+}
+const frameStep = () => Math.min(1 / 30, ...teActive().map(s => 1 / (s.fps * s.slow)));
+const fmtRel = (r) => (Math.abs(r) < 2 ? `離れから ${r >= 0 ? '+' : '−'}${Math.abs(Math.round(r * 1000))} ミリ秒` : `離れから ${r >= 0 ? '+' : '−'}${Math.abs(r).toFixed(2)} 秒`);
+
+// ---- モード ----
+function syncBanner() {
+  const te = uiMode === 'te';
+  $('#sampleBanner').hidden = !(te ? TE.sample : S.sample);
+  $('#sampleText').textContent = te ? '合成データの弓手・馬手です。接写の動画を選ぶと、あなたの記録に切り替わります。' : '合成データの射です。動画を選ぶと、あなたの射に切り替わります。';
+}
+function syncModeBtns() { $$('#modeSeg button').forEach(b => { b.disabled = S.busy && b.dataset.mode !== uiMode; }); }
+function setMode(m) {
+  if (S.busy && m !== uiMode) return;
+  uiMode = m;
+  document.body.classList.toggle('mode-te', m === 'te');
+  $$('#modeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === m)));
+  store.set('mode', m);
+  pause(); tePause();
+  if (m === 'te') { layoutTe(); renderTe(); refreshNames(); }
+  else { layoutFrames(); renderAll(); }
+  renderShotBar();
+  syncBanner();
+}
+$$('#modeSeg button').forEach(b => b.addEventListener('click', () => setMode(b.dataset.mode)));
+
+// ---- サンプルと初期化 ----
+function loadTeSample() {
+  for (const key of TKEYS) {
+    const s = TV[key], raw = key === 'yunde' ? K.makeYundeSample() : K.makeMeteSample();
+    const tr = K.prepareClose(raw);
+    Object.assign(s, { track: tr, status: 'done', w: tr.w, h: tr.h, duration: tr.duration, slow: 1, fps: 240, sampleBg: true, stage: raw.stage || null, flip: null, by: null, partAt: null, partShot: null, url: null, file: null, manualT: null, marks: [], error: '' });
+    s.slowSel.value = slowPref(key);
+  }
+  TE.sample = true; recomputeTe(true); TE.rel = -0.25;
+}
+// 「時間の流れ」はカメラの設定なので、枠ごとに覚えておく
+const slowPref = (key) => (['1', '4', '8'].includes(store.get('slow-' + key)) ? store.get('slow-' + key) : '1');
+function resetTe() {
+  tePause();
+  for (const s of Object.values(TV)) {
+    if (s.url) URL.revokeObjectURL(s.url);
+    s.video.removeAttribute('src'); try { s.video.load(); } catch (e) { /* なし */ }
+    Object.assign(s, { file: null, url: null, track: null, ph: null, phAuto: null, manualT: null, metrics: [], status: 'empty', progress: 0, w: 0, h: 0, duration: 0, slow: Number(slowPref(s.key)), fps: 30, pick: null, marks: [], calT: null, liveK: null, flip: null, sampleBg: false, stage: null, partAt: null, partShot: null, by: null, thumbs: null, sheets: null, tile: null, error: '' });
+    s.slowSel.value = slowPref(s.key);
+  }
+  TE.rel = 0; TE.sample = false;
+}
+function recomputeTe(resetPh) {
+  for (const s of Object.values(TV)) {
+    if (!s.track) { s.ph = null; s.metrics = []; continue; }
+    if (resetPh || !s.phAuto) s.phAuto = K.detectClosePhases(s.track);
+    let ph = s.phAuto ? { ...s.phAuto } : null;
+    if (!ph) { const gr = s.track.grid, a = gr.t0, b = gr.gt[gr.G - 1]; ph = { tStart: a, tKai: a, tHanare: a + (b - a) * 0.6, tEnd: b, auto: false, fallback: true }; }
+    const shared = HR.rec && HR.rec.rel ? HR.rec.rel[s.key] : null;
+    const ov = Number.isFinite(s.manualT) ? s.manualT : (Number.isFinite(shared) ? shared : null);
+    if (Number.isFinite(ov)) { const d = ov - ph.tHanare; ph.tHanare = ov; ph.tKai = clamp(ph.tKai + d, ph.tStart, ov - 0.2); ph.auto = false; ph.fallback = false; }
+    s.ph = ph;
+    try { s.metrics = s.key === 'yunde' ? K.yundeMetrics(s.track, ph, { heightCm: S.heightCm }) : K.meteMetrics(s.track, ph, { spacingCm: TE.spacingCm }); }
+    catch (e) { console.error(e); s.metrics = []; }
+  }
+}
+
+// ---- 配置 ----
+function teVisible() {
+  if (TE.view !== 'both') return [TE.view];
+  return TKEYS;
+}
+function layoutTe() {
+  const keys = teVisible(), st = $('#teStage'), W = st.clientWidth || 320;
+  const n = keys.length === 2 && W >= 560 ? 2 : 1;
+  st.style.setProperty('--n', n);
+  const colW = (W - 8 * (n - 1)) / n;
+  const maxH = Math.max(220, Math.min(window.innerHeight * (keys.length === 2 && n === 1 ? 0.44 : 0.66), 760));
+  for (const key of TKEYS) {
+    const s = TV[key];
+    s.pane.hidden = !keys.includes(key);
+    if (s.pane.hidden) continue;
+    const ar = s.w && s.h ? s.w / s.h : 3 / 4;
+    let w = colW, h = w / ar; if (h > maxH) { h = maxH; w = h * ar; }
+    s.frame.style.width = Math.floor(w) + 'px'; s.frame.style.height = Math.floor(h) + 'px';
+    s.canvas.width = Math.round(Math.floor(w) * dpr); s.canvas.height = Math.round(Math.floor(h) * dpr);
+  }
+}
+
+// ---- サンプルの「動画」 ----
+function paintTeStage(g, W, H) {
+  const gr = g.createLinearGradient(0, 0, 0, H); gr.addColorStop(0, '#4a4338'); gr.addColorStop(1, '#2e2a24');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+}
+function paintHandSample(g, s, k, sc, real) {
+  paintTeStage(g, g.canvas.width, g.canvas.height);
+  const st = s.stage || { bowX0: 340, bowX1: 401, gripY0: 326, gripY1: 686, arrowY: 283, arrowH: 7 };
+  const bx0 = st.bowX0 * sc, bx1 = st.bowX1 * sc, H = g.canvas.height;
+  const wg = g.createLinearGradient(bx0, 0, bx1, 0); wg.addColorStop(0, '#7a5a2a'); wg.addColorStop(0.5, '#b88a45'); wg.addColorStop(1, '#6d4f24');
+  g.fillStyle = wg; g.fillRect(bx0, 0, bx1 - bx0, H);
+  g.fillStyle = '#4a2e1c'; g.fillRect(bx0 - 1, st.gripY0 * sc, bx1 - bx0 + 2, (st.gripY1 - st.gripY0) * sc);
+  if (!s.ph || real < s.ph.tHanare) { g.fillStyle = '#d8c28a'; g.fillRect(0, st.arrowY * sc, g.canvas.width, st.arrowH * sc); }
+  if (!k) return;
+  const P = (p) => [p.x * sc, p.y * sc];
+  const palm = Math.hypot(k[9].x - k[0].x, k[9].y - k[0].y) * sc;
+  g.fillStyle = '#e2ba96'; g.beginPath(); [0, 1, 2, 5, 9, 13, 17].forEach((j, i) => (i ? g.lineTo(...P(k[j])) : g.moveTo(...P(k[j])))); g.closePath(); g.fill();
+  g.strokeStyle = '#e2ba96'; g.lineCap = 'round'; g.lineJoin = 'round';
+  for (const f of [[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16], [17, 18, 19, 20]]) {
+    g.lineWidth = palm * (f[0] === 1 ? 0.3 : 0.24); g.beginPath(); f.forEach((j, i) => (i ? g.lineTo(...P(k[j])) : g.moveTo(...P(k[j])))); g.stroke();
+  }
+  g.strokeStyle = '#d9b08a'; g.lineWidth = palm * 0.55; g.beginPath(); g.moveTo(...P(k[0])); g.lineTo(k[0].x * sc - palm * 0.9, k[0].y * sc + palm * 0.15); g.stroke();
+}
+function paintYugakeSample(g, m, sc) {
+  paintTeStage(g, g.canvas.width, g.canvas.height);
+  if (!m) return;
+  const a = { x: m[0].x * sc, y: m[0].y * sc }, b = { x: m[1].x * sc, y: m[1].y * sc }, w = { x: m[2].x * sc, y: m[2].y * sc };
+  const L = Math.hypot(b.x - a.x, b.y - a.y) || 1, c = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, ang = Math.atan2(b.y - a.y, b.x - a.x);
+  g.strokeStyle = '#6f5034'; g.lineCap = 'round'; g.lineWidth = L * 0.75; g.beginPath(); g.moveTo(w.x, w.y); g.lineTo(w.x + (w.x - c.x) * 1.6, w.y + (w.y - c.y) * 1.6); g.stroke();
+  g.fillStyle = '#7c5a39'; g.save(); g.translate(w.x, w.y); g.rotate(Math.atan2(w.y - c.y, w.x - c.x) - Math.PI / 2); roundRect(g, -L * 0.48, -L * 0.24, L * 0.96, L * 0.5, L * 0.08); g.fill(); g.restore();
+  g.fillStyle = '#9b7650'; g.save(); g.translate(c.x, c.y); g.rotate(ang); roundRect(g, -L * 0.85, -L * 0.62, L * 1.7, L * 1.25, L * 0.3); g.fill(); g.restore();
+  const r = L * 0.1;
+  [[a, '#f5c542'], [b, '#2f7de1'], [w, '#5dbb3a']].forEach(([p, col]) => { g.fillStyle = col; g.beginPath(); g.arc(p.x, p.y, r, 0, Math.PI * 2); g.fill(); });
+}
+
+// ---- 描画 ----
+function drawTeView(s) {
+  const c = s.canvas, ctx = c.getContext('2d'), W = c.width, H = c.height;
+  ctx.clearRect(0, 0, W, H);
+  if (!s.w || s.pane.hidden) { s.hudPhase.textContent = ''; s.hudVal.textContent = ''; return; }
+  const sc = W / s.w, lw = Math.max(2, W / 150);
+  const P = (p) => [p.x * sc, p.y * sc];
+  const real = s.track ? realOf(s) : 0;
+  if (s.sampleBg) { const q = K.closeAt(s.track, real); if (s.key === 'yunde') paintHandSample(ctx, s, q, sc, real); else paintYugakeSample(ctx, q, sc); }
+  else if (s.flip && !s.url) drawFlip(ctx, s, real, W, H);
+  else if (!s.url && s.track) { ctx.fillStyle = '#0e1013'; ctx.fillRect(0, 0, W, H); }
+  if (s.status === 'analyzing') {
+    if (s.liveK) { if (s.key === 'yunde') drawHandSkel(ctx, s.liveK, P, lw); else drawMarks(ctx, s.liveK, P, lw); }
+    s.hudPhase.textContent = '解析中'; s.hudVal.textContent = ''; return;
+  }
+  if (s.status === 'ready') {
+    if (s.key === 'yunde' && s.pick) { const [x, y] = P(s.pick); ctx.strokeStyle = C['ov-ya']; ctx.lineWidth = lw; ctx.beginPath(); ctx.arc(x, y, 22 * dpr, 0, Math.PI * 2); ctx.stroke(); }
+    if (s.key === 'mete') s.marks.forEach((m, i) => { const [x, y] = P(m); ctx.strokeStyle = '#fff'; ctx.lineWidth = lw * 0.8; ctx.beginPath(); ctx.arc(x, y, Math.max(10 * dpr, m.ref.r / m.sc * sc * 1.6), 0, Math.PI * 2); ctx.stroke(); ctx.fillStyle = MK[i].col; ctx.font = `700 ${Math.round(12 * dpr)}px ${getComputedStyle(document.body).fontFamily}`; ctx.fillText(MK[i].name, x + 14 * dpr, y - 10 * dpr); });
+    s.hudPhase.textContent = ''; s.hudVal.textContent = ''; return;
+  }
+  if (!s.track) { s.hudPhase.textContent = ''; s.hudVal.textContent = ''; return; }
+  const pi = K.closePhaseAt(s.ph, real);
+  s.hudPhase.textContent = pi >= 0 ? K.TPH[pi].name : '';
+  const q = K.closeAt(s.track, real);
+  if (!q) { s.hudVal.textContent = '範囲外'; return; }
+  if (s.key === 'yunde') drawYundeOverlay(ctx, s, q, P, lw, real, sc);
+  else drawMeteOverlay(ctx, s, q, P, lw, real, sc);
+}
+function drawHandSkel(ctx, k, P, lw) {
+  const col = { t: C['ov-ya'], f: C['ov-yunde'], p: C['ov-trunk'] };
+  ctx.lineCap = 'round'; ctx.setLineDash([]);
+  for (const [a, b, s] of K.HAND_EDGES) { ctx.globalAlpha = 0.95; ctx.strokeStyle = col[s]; ctx.lineWidth = lw * (s === 'p' ? 0.75 : 1); ctx.beginPath(); ctx.moveTo(...P(k[a])); ctx.lineTo(...P(k[b])); ctx.stroke(); }
+  for (let j = 0; j < 21; j++) { ctx.fillStyle = j >= 1 && j <= 4 ? C['ov-ya'] : (j === 0 || j % 4 === 1 ? C['ov-trunk'] : C['ov-yunde']); ctx.beginPath(); ctx.arc(...P(k[j]), lw * (j === 4 ? 1.6 : 1.1), 0, Math.PI * 2); ctx.fill(); }
+  ctx.globalAlpha = 1;
+}
+function drawMarks(ctx, m, P, lw, ok) {
+  m.forEach((p, i) => {
+    const [x, y] = P(p);
+    ctx.setLineDash(ok && !ok[i] ? [lw, lw] : []);
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = lw * 0.8; ctx.beginPath(); ctx.arc(x, y, lw * 3.2, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = MK[i].col; ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.arc(x, y, lw * 1.4, 0, Math.PI * 2); ctx.fill(); ctx.globalAlpha = 1;
+  });
+  ctx.setLineDash([]);
+}
+function drawYundeOverlay(ctx, s, k, P, lw, real) {
+  const sT = s.track.sT || 1;
+  const palm = Math.hypot(k[9].x - k[0].x, k[9].y - k[0].y) * (ctx.canvas.width / s.w);
+  const [mx, my] = P(k[2]), [tx, ty] = P(k[4]);
+  if (TE.layers.guide) {
+    ctx.setLineDash([lw * 2, lw * 1.5]); ctx.strokeStyle = C['ov-guide']; ctx.lineWidth = Math.max(1, lw * 0.6);
+    ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(mx + sT * palm * 1.5, my); ctx.stroke();
+    const [wx, wy] = P(k[0]), [ux, uy] = P(k[9]);
+    ctx.strokeStyle = 'rgba(233,237,242,.55)';
+    ctx.beginPath(); ctx.moveTo(wx - (ux - wx) * 0.4, wy - (uy - wy) * 0.4); ctx.lineTo(ux + (ux - wx) * 0.9, uy + (uy - wy) * 0.9); ctx.stroke();
+    ctx.setLineDash([]);
+    const a0 = sT > 0 ? 0 : Math.PI, a1 = Math.atan2(ty - my, tx - mx);
+    ctx.strokeStyle = C['ov-guide']; ctx.beginPath(); ctx.arc(mx, my, palm * 0.55, Math.min(a0, a1), Math.max(a0, a1)); ctx.stroke();
+  }
+  if (TE.layers.trail && s.ph && real > s.ph.tHanare - 0.05) {
+    ctx.strokeStyle = C['ov-ya']; ctx.globalAlpha = 0.6; ctx.lineWidth = lw * 0.6; ctx.beginPath(); let f = true;
+    for (let t = s.ph.tHanare - 0.05; t <= real; t += Math.max(s.track.dt, 1 / 240)) { const q = K.closeAt(s.track, t); if (!q) continue; const [x, y] = P(q[4]); if (f) { ctx.moveTo(x, y); f = false; } else ctx.lineTo(x, y); }
+    ctx.stroke(); ctx.globalAlpha = 1;
+  }
+  if (TE.layers.skel) drawHandSkel(ctx, k, P, lw);
+  const ang = Math.atan2(-(k[4].y - k[2].y), (k[4].x - k[2].x) * sT) * 180 / Math.PI;
+  s.hudVal.textContent = `角見 ${ang >= 0 ? '上' : '下'}へ ${Math.abs(ang).toFixed(1)}°`;
+}
+function meteTheta(q) { return Math.atan2(-(q[1].y - q[0].y), q[1].x - q[0].x) * 180 / Math.PI; }
+function drawMeteOverlay(ctx, s, q, P, lw, real) {
+  const [ax, ay] = P(q[0]), [bx, by] = P(q[1]), [gx, gy] = P(q[2]);
+  const L = Math.hypot(bx - ax, by - ay) || 1, th = meteTheta(q);
+  if (TE.layers.trail && s.ph && real > s.ph.tHanare - 0.03) {
+    ctx.strokeStyle = MK[2].col; ctx.globalAlpha = 0.65; ctx.lineWidth = lw * 0.6; ctx.beginPath(); let f = true;
+    for (let t = s.ph.tHanare - 0.03; t <= real; t += Math.max(s.track.dt, 1 / 240)) { const r = K.closeAt(s.track, t); if (!r) continue; const [x, y] = P(r[2]); if (f) { ctx.moveTo(x, y); f = false; } else ctx.lineTo(x, y); }
+    ctx.stroke(); ctx.globalAlpha = 1;
+  }
+  if (TE.layers.guide) {
+    ctx.setLineDash([lw * 2, lw * 1.5]); ctx.strokeStyle = C['ov-guide']; ctx.lineWidth = Math.max(1, lw * 0.6);
+    ctx.beginPath(); ctx.moveTo(ax - L * 0.2, ay); ctx.lineTo(ax + L * 1.4, ay); ctx.stroke(); ctx.setLineDash([]);
+    const a1 = Math.atan2(by - ay, bx - ax);
+    ctx.beginPath(); ctx.arc(ax, ay, L * 0.55, Math.min(0, a1), Math.max(0, a1)); ctx.stroke();
+    ctx.strokeStyle = 'rgba(233,237,242,.6)'; ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo((ax + bx) / 2, (ay + by) / 2); ctx.stroke();
+  }
+  if (TE.layers.skel) {
+    ctx.strokeStyle = C['ov-ya']; ctx.lineWidth = lw * 1.1; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    drawMarks(ctx, q, P, lw, q.ok);
+  }
+  let txt = `捻り ${Math.abs(th).toFixed(1)}°（小指側が${th >= 0 ? '上' : '下'}）`;
+  const base = s.metrics.find(m => m.key === 'm_twist');
+  if (base && Number.isFinite(base.value)) { let d = th - base.value; while (d > 180) d -= 360; while (d < -180) d += 360; if (Math.abs(d) >= 0.5) txt += ` 会から${d >= 0 ? '内' : '外'}へ ${Math.abs(d).toFixed(1)}°`; }
+  s.hudVal.textContent = txt;
+}
+function drawTeTimeline() {
+  const cv = $('#teTimeline'); const [W, H] = sizeCanvas(cv, 50); const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, W, H); ctx.fillStyle = C.sunk; roundRect(ctx, 0, 0, W, H, 8 * dpr); ctx.fill();
+  const [lo0, hi0] = relRange(); if (!(hi0 > lo0)) return;
+  const [lo, hi] = TE.zoom ? [Math.max(lo0, -0.5), Math.min(hi0, 0.6)] : [lo0, hi0];
+  const X = (r) => clamp((r - lo) / (hi - lo), 0, 1) * W, y0 = 6 * dpr, bh = H - 22 * dpr;
+  const s = TV.mete.track ? TV.mete : TV.yunde;
+  if (s.ph) {
+    const h0 = tH(s), b = [lo0, s.ph.tKai - h0, 0, 0.3, hi0], cur = K.closePhaseAt(s.ph, realOf(s));
+    ctx.font = `800 ${Math.round(12 * dpr)}px ${getComputedStyle(document.documentElement).getPropertyValue('--font-display')}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let i = 0; i < 4; i++) {
+      const x0 = X(b[i]), x1 = X(b[i + 1]); if (x1 - x0 < 0.5) continue;
+      ctx.fillStyle = i === cur ? C.main : (i % 2 ? C.surface : C.bg); ctx.fillRect(x0, y0, x1 - x0, bh);
+      if (x1 - x0 > 30 * dpr) { ctx.fillStyle = i === cur ? C.surface : C.ink; ctx.fillText(K.TPH[i].name, (x0 + x1) / 2, y0 + bh / 2 + 1); }
+    }
+  }
+  ctx.fillStyle = C.muted; ctx.font = `${Math.round(10.5 * dpr)}px ${getComputedStyle(document.body).fontFamily}`; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  const span = hi - lo, step = span <= 1.2 ? 0.1 : span <= 3 ? 0.5 : span <= 8 ? 1 : 2;
+  for (let r = Math.ceil(lo / step) * step; r <= hi + 1e-9; r += step) {
+    const x = X(r); ctx.fillRect(x - 0.5, H - 15 * dpr, 1, 4 * dpr);
+    const lab = step < 0.5 ? `${Math.round(r * 1000)}` : `${+r.toFixed(1)}秒`;
+    if ((step < 0.5 && Math.round(r * 10) % 2 === 0) || step >= 0.5) ctx.fillText(lab, clamp(x, 14 * dpr, W - 14 * dpr), H - 3 * dpr);
+  }
+  const x0 = X(0); ctx.fillStyle = C.ya; ctx.beginPath(); ctx.moveTo(x0 - 5 * dpr, 0); ctx.lineTo(x0 + 5 * dpr, 0); ctx.lineTo(x0, 7 * dpr); ctx.closePath(); ctx.fill();
+  const xp = X(TE.rel); ctx.fillStyle = C.sub; ctx.fillRect(xp - dpr, 0, 2 * dpr, H - 16 * dpr);
+}
+function teSeries() {
+  const out = [];
+  const y = TV.yunde, m = TV.mete;
+  if (m.track && m.ph) {
+    const base = (m.metrics.find(x => x.key === 'm_twist') || {}).value;
+    const arr = []; const gr = m.track.grid;
+    for (let g = 0; g < gr.G; g += Math.max(1, Math.floor(gr.G / 900))) { let d = m.track.sig.ori[g] - (Number.isFinite(base) ? base : 0); while (d > 180) d -= 360; while (d < -180) d += 360; arr.push([gr.gt[g] - tH(m), d]); }
+    out.push({ name: '馬手の捻り（会からの変化、内が＋）', col: C['mete-ln'], arr });
+  }
+  if (y.track && y.ph) {
+    const sT = y.track.sT || 1, gr = y.track.grid, a1 = [], a2 = [];
+    const base = (y.metrics.find(x => x.key === 'y_tilt') || {}).value;
+    for (let g = 0; g < gr.G; g += Math.max(1, Math.floor(gr.G / 900))) {
+      const k = K.closeGrid(y.track, g), t = gr.gt[g] - tH(y);
+      a1.push([t, Math.atan2(-(k[4].y - k[2].y), (k[4].x - k[2].x) * sT) * 180 / Math.PI]);
+      a2.push([t, Math.atan2((k[17].x - k[5].x) * sT, k[17].y - k[5].y) * 180 / Math.PI - (Number.isFinite(base) ? base : 0)]);
+    }
+    out.push({ name: '弓手の角見（上が＋）', col: C['yunde-ln'], arr: a1 });
+    out.push({ name: '弓手の手の内の回り（会からの変化）', col: C.ya, arr: a2 });
+  }
+  return out;
+}
+function drawTeChart() {
+  const cv = $('#teChart'); const [W, H] = sizeCanvas(cv, 230); const ctx = cv.getContext('2d'); ctx.clearRect(0, 0, W, H);
+  ctx.font = `${Math.round(11 * dpr)}px ${getComputedStyle(document.body).fontFamily}`;
+  const ser = teSeries();
+  const leg = $('#teLegend'); leg.textContent = '';
+  for (const s of ser) { const sp = document.createElement('span'); const i = document.createElement('i'); i.style.background = s.col; sp.appendChild(i); sp.appendChild(document.createTextNode(s.name)); leg.appendChild(sp); }
+  if (!ser.length) { ctx.fillStyle = C.muted; ctx.fillText('解析すると表示します', 12 * dpr, 24 * dpr); return; }
+  const [lo0, hi0] = relRange();
+  const [lo, hi] = TE.zoom ? [Math.max(lo0, -0.5), Math.min(hi0, 0.6)] : [lo0, hi0];
+  const padL = 40 * dpr, padR = 10 * dpr, top = 10 * dpr, bot = H - 22 * dpr;
+  const X = (t) => padL + clamp((t - lo) / (hi - lo), 0, 1) * (W - padL - padR);
+  let vlo = Infinity, vhi = -Infinity;
+  for (const s of ser) for (const [t, v] of s.arr) if (t >= lo && t <= hi && Number.isFinite(v)) { vlo = Math.min(vlo, v); vhi = Math.max(vhi, v); }
+  if (!Number.isFinite(vlo)) { vlo = -10; vhi = 10; }
+  const stepV = (vhi - vlo) > 120 ? 40 : (vhi - vlo) > 60 ? 20 : 10;
+  vlo = Math.floor(Math.min(vlo, -5) / stepV) * stepV; vhi = Math.ceil(Math.max(vhi, 5) / stepV) * stepV;
+  const Y = (v) => top + (1 - (v - vlo) / (vhi - vlo || 1)) * (bot - top);
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1; ctx.fillStyle = C.muted; ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let v = vlo; v <= vhi + 1e-6; v += stepV) { ctx.beginPath(); ctx.moveTo(padL, Y(v)); ctx.lineTo(W - padR, Y(v)); ctx.stroke(); ctx.fillText(v + '°', padL - 6 * dpr, Y(v)); }
+  ctx.save(); ctx.beginPath(); ctx.rect(padL, 0, W - padL - padR, H); ctx.clip();
+  for (const s of ser) {
+    ctx.strokeStyle = s.col; ctx.lineWidth = 2 * dpr; ctx.lineJoin = 'round'; ctx.beginPath(); let f = true;
+    for (const [t, v] of s.arr) { if (t < lo - 0.05 || t > hi + 0.05 || !Number.isFinite(v)) continue; if (f) { ctx.moveTo(X(t), Y(v)); f = false; } else ctx.lineTo(X(t), Y(v)); }
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.fillStyle = C.ya; ctx.fillRect(X(0) - dpr * 0.75, top, 1.5 * dpr, bot - top);
+  ctx.fillStyle = C.sub; ctx.fillRect(X(TE.rel) - dpr * 0.75, top, 1.5 * dpr, bot - top);
+  ctx.fillStyle = C.muted; ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  const span = hi - lo, st = span <= 1.2 ? 0.2 : span <= 3 ? 0.5 : span <= 8 ? 1 : 2;
+  for (let r = Math.ceil(lo / st) * st; r <= hi + 1e-9; r += st) ctx.fillText(st < 0.5 ? `${Math.round(r * 1000)}ms` : `${+r.toFixed(1)}秒`, clamp(X(r), padL + 16 * dpr, W - 24 * dpr), H - 6 * dpr);
+}
+function updateTeTransport() {
+  $('#teTime').textContent = teActive().length ? fmtRel(TE.rel) : '—';
+  $('#tePlayIcon').innerHTML = TE.playing ? '<path d="M5 4h3.5v12H5zM11.5 4H15v12h-3.5z"/>' : '<path d="M6 4v12l10-6z"/>';
+  $('#tePlay').setAttribute('aria-label', TE.playing ? '一時停止' : '再生');
+}
+function drawTeAll() {
+  if (uiMode !== 'te') return;
+  for (const s of Object.values(TV)) drawTeView(s);
+  drawTeTimeline(); drawTeChart(); updateTeTransport();
+}
+
+// ---- 枠と案内 ----
+function renderTeSlots() {
+  for (const s of Object.values(TV)) {
+    const c = $('[data-st]', s.slot), f = $('[data-file]', s.slot);
+    const set = (st, cls, file) => { c.textContent = st; c.className = 'chip ' + (cls || ''); if (file != null) f.textContent = file; };
+    const name = s.file ? s.file.name : '';
+    if (TE.sample) set('サンプル', 'info', s.key === 'yunde' ? '正面寄りから弓手を大きく' : '後ろから馬手を大きく（目印3つ）');
+    else if (s.status === 'empty') set('未選択', '', s.key === 'yunde' ? '正面寄りから弓手を大きく' : '後ろから馬手を大きく（目印3つ）');
+    else if (s.status === 'loading') set('読み込み中', 'busy', name);
+    else if (s.status === 'ready') set(s.key === 'mete' && s.marks.length < 3 ? `目印 ${s.marks.length}/3` : '解析待ち', 'warn', name);
+    else if (s.status === 'analyzing') set(`解析中 ${Math.round(s.progress * 100)}%`, 'busy', null);
+    else if (s.status === 'done') set('解析済み', 'ok', s.partShot && s.partShot === HR.id ? whoText(s.by) : name);
+    else if (s.status === 'error') set('エラー', 'warn', name);
+    s.slowSel.disabled = S.busy;
+    const fpsEl = $('#fps-' + s.key);
+    fpsEl.textContent = s.status === 'empty' || TE.sample ? '' : `毎秒 ${s.fps} コマ${s.slow > 1 ? `（実時間で ${s.fps * s.slow}）` : ''}`;
+  }
+}
+function renderTeMsg(s) {
+  const m = s.msg, ctl = s.ctl; s.prog.hidden = s.status !== 'analyzing';
+  ctl.hidden = s.status !== 'ready';
+  s.video.hidden = !(s.url && !TE.sample && s.status !== 'error' && s.status !== 'empty');
+  if (s.status === 'empty' && !s.track) {
+    m.hidden = false; m.className = 'pane-msg center';
+    m.innerHTML = `<span>${s.label}の接写動画はまだありません</span><label class="btn small file-btn">動画を選ぶ<input type="file" accept="video/*" aria-label="${s.label}の接写動画を選ぶ"></label>`;
+    $('input', m).addEventListener('change', (e) => onTeFile(s.key, e.target.files[0]));
+  } else if (s.status === 'loading') { m.hidden = false; m.className = 'pane-msg center'; m.textContent = '読み込み中…（コマ数を調べています）'; }
+  else if (s.status === 'ready') {
+    m.hidden = true;
+    const scrub = `<label class="scrub"><span>コマを選ぶ</span><input type="range" min="0" max="${s.duration.toFixed(3)}" step="${(1 / s.fps).toFixed(4)}" value="${s.video.currentTime.toFixed(3)}" aria-label="表示するコマ"></label>`;
+    if (s.key === 'yunde') {
+      ctl.innerHTML = `<span>弓手が画面の真ん中にない時は、解析の前に手をタップしてください。${s.pick ? '（指定済み）' : ''}</span>${scrub}<button type="button" class="btn small" data-go>解析する</button>`;
+    } else {
+      const n = s.marks.length;
+      const warn = s.marks.filter(m => m.clash).map((m, i) => MK[s.marks.indexOf(m)].name);
+      const next = n < 3 ? `目印がはっきり見えるコマで、<i class="mk-dot" style="background:${MK[n].col}"></i><b>${MK[n].name}</b>（${MK[n].note}）の真ん中をタップしてください（${n + 1}/3）` : '3つの目印の色を覚えました。';
+      const wtxt = warn.length ? `<small class="ctl-warn">${warn.join('・')}の目印と同じような色が、ゆがけや背景にも写っています。うまく追えない時は、ほかと違う色の目印にしてください。</small>` : '';
+      ctl.innerHTML = `<span>${next}</span>${wtxt}${n ? '' : scrub}<div class="msg-row">${n ? '<button type="button" class="btn small ghost" data-redo>やり直す</button>' : ''}<button type="button" class="btn small" data-go ${n < 3 ? 'disabled' : ''}>解析する</button></div>`;
+      const redo = $('[data-redo]', ctl); if (redo) redo.addEventListener('click', () => { s.marks = []; s.calT = null; renderTe(); });
+    }
+    const r = $('input[type=range]', ctl);
+    if (r) r.addEventListener('input', () => { seekTo(s.video, Number(r.value)).then(() => drawTeView(s)); });
+    $('[data-go]', ctl).addEventListener('click', () => startTeAnalysis(s.key));
+  } else if (s.status === 'error') {
+    m.hidden = false; m.className = 'pane-msg center';
+    m.innerHTML = '<span></span><label class="btn small file-btn">別の動画を選ぶ<input type="file" accept="video/*"></label>';
+    $('span', m).textContent = s.error || '解析できませんでした';
+    $('input', m).addEventListener('change', (e) => onTeFile(s.key, e.target.files[0]));
+  } else m.hidden = true;
+}
+function renderTeAdj() {
+  const L = $('#teAdj'); L.innerHTML = '';
+  const any = teActive();
+  if (!any.length) { L.innerHTML = '<p class="adj-note">解析が終わると直せます。</p>'; return; }
+  for (const s of any) {
+    const row = document.createElement('div'); row.className = 'adj-row';
+    row.innerHTML = `<span class="lbl">${s.label}の離れ</span><span class="tv">${tH(s).toFixed(3)}秒${s.ph && s.ph.auto ? '' : '＊'}</span><button type="button" data-d="-1">−1コマ</button><button type="button" data-d="1">＋1コマ</button><button type="button" data-here>ここ</button><button type="button" data-auto>自動</button>`;
+    row.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b || !s.ph) return;
+      const real = realOf(s), fr = 1 / (s.fps * s.slow);
+      let v = b.hasAttribute('data-auto') ? null : b.hasAttribute('data-here') ? real : tH(s) + Number(b.dataset.d) * fr;
+      if (v != null) v = clamp(v, s.ph.tStart + 0.25, s.ph.tEnd - 0.05);
+      if (canShareTe() && HR.rec) { HR.rec = { ...HR.rec, rel: { ...(HR.rec.rel || {}), [s.key]: v } }; s.manualT = null; shareHand({ rel: HR.rec.rel }); }
+      else s.manualT = v;
+      const keep = real; recomputeTe(false); TE.rel = keep - tH(s);
+      renderTe();
+    });
+    L.appendChild(row);
+  }
+  const note = document.createElement('p'); note.className = 'adj-note';
+  note.textContent = '「ここ」はいまの位置を離れにします。2本ある時は、それぞれの離れの瞬間で時刻をそろえて並べます。＊は手で直した位置です。';
+  L.appendChild(note);
+}
+function renderTeMetrics() {
+  const A = $('#teMetrics');
+  const all = TKEYS.flatMap(k => TV[k].metrics);
+  if (!all.length) { A.innerHTML = '<p class="empty-note">弓手・馬手の接写動画を解析すると、ここに手の内とひねりの計測が並びます。</p>'; return; }
+  const fb = teActive().filter(s => s.ph && s.ph.fallback);
+  let html = fb.length ? `<p class="empty-note" style="margin:0 0 12px">${fb.map(s => s.label).join('・')}の離れを自動で見つけられませんでした。「離れの位置を直す」で合わせてください。</p>` : '';
+  html += '<div class="groups">';
+  for (const [g, name, sub] of TGROUPS) {
+    const rows = all.filter(m => m.group === g); if (!rows.length) continue;
+    html += `<div class="group"><h3>${name}<span>${sub}</span></h3>`;
+    for (const m of rows) html += `<button type="button" class="mrow" data-tkey="${m.key}"><span class="m-l">${esc(m.label)}</span>${m.verdict ? `<span class="chip ${m.status}">${esc(m.verdict)}</span>` : ''}<span class="m-v">${esc(m.display)}</span>${m.note ? `<span class="m-n">${esc(m.note)}</span>` : ''}</button>`;
+    html += '</div>';
+  }
+  A.innerHTML = html + '</div>';
+  $$('[data-tkey]', A).forEach(b => b.addEventListener('click', () => {
+    const m = all.find(x => x.key === b.dataset.tkey); if (!m || !Number.isFinite(m.t)) return;
+    const s = TV[m.side]; tePause();
+    if (TE.view !== 'both' && TE.view !== m.side) setTeView(m.side);
+    teSetTime(m.t - tH(s));
+    $('#teSec').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  }));
+}
+function renderTe() {
+  renderTeSlots();
+  if (uiMode !== 'te') return;
+  syncBanner(); renderShotBar();
+  layoutTe(); for (const s of Object.values(TV)) renderTeMsg(s);
+  renderTeAdj(); renderTeMetrics(); drawTeAll();
+}
+function setTeView(v) { TE.view = v; $$('#teView button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.tv === v))); layoutTe(); drawTeAll(); }
+$$('#teView button').forEach(b => b.addEventListener('click', () => setTeView(b.dataset.tv)));
+$$('#teLayers .tog').forEach(b => { b.setAttribute('aria-pressed', String(!!TE.layers[b.dataset.tl])); b.addEventListener('click', () => { const k = b.dataset.tl; TE.layers[k] = !TE.layers[k]; b.setAttribute('aria-pressed', String(TE.layers[k])); drawTeAll(); }); });
+$('#teZoom').addEventListener('change', (e) => { TE.zoom = e.target.checked; drawTeAll(); });
+
+// ---- 再生 ----
+let teRaf = 0, teLast = 0;
+const teVideoActive = (s) => !TE.sample && s.url && s.status === 'done' && s.track;
+function teSetTime(rel) {
+  const [lo, hi] = relRange(); TE.rel = clamp(rel, lo, hi);
+  for (const s of Object.values(TV)) if (teVideoActive(s)) { const vt = realOf(s) * s.slow; if (vt >= 0 && vt <= s.duration) { try { s.video.currentTime = vt; } catch (e) { /* 読み込み中 */ } } }
+  drawTeAll();
+}
+function tePlay() {
+  if (!teActive().length) return;
+  const [lo, hi] = relRange(); if (TE.rel >= hi - 0.005) TE.rel = lo;
+  TE.playing = true;
+  for (const s of Object.values(TV)) if (teVideoActive(s)) { s.video.playbackRate = clamp(TE.rate * s.slow, 0.0625, 16); const vt = realOf(s) * s.slow; if (vt >= 0 && vt < s.duration) { s.video.currentTime = vt; s.video.play().catch(() => {}); } }
+  teLast = performance.now(); cancelAnimationFrame(teRaf); teRaf = requestAnimationFrame(teTick); updateTeTransport();
+}
+function tePause() {
+  TE.playing = false; cancelAnimationFrame(teRaf);
+  for (const s of Object.values(TV)) if (teVideoActive(s)) s.video.pause();
+  if (uiMode === 'te' && $('#teTime')) updateTeTransport();
+}
+function teTick(now) {
+  if (!TE.playing) return;
+  const master = Object.values(TV).find(s => teVideoActive(s) && !s.video.paused);
+  if (master) TE.rel = master.video.currentTime / master.slow - tH(master); else TE.rel += (now - teLast) / 1000 * TE.rate;
+  teLast = now;
+  for (const s of Object.values(TV)) {
+    if (s === master || !teVideoActive(s)) continue;
+    const vt = realOf(s) * s.slow;
+    if (vt < 0 || vt > s.duration) { if (!s.video.paused) s.video.pause(); continue; }
+    if (s.video.paused) { s.video.currentTime = vt; s.video.playbackRate = clamp(TE.rate * s.slow, 0.0625, 16); s.video.play().catch(() => {}); }
+    else if (Math.abs(s.video.currentTime - vt) > 0.1 * s.slow) s.video.currentTime = vt;
+  }
+  const [, hi] = relRange(); if (TE.rel >= hi) { TE.rel = hi; tePause(); }
+  drawTeAll();
+  if (TE.playing) teRaf = requestAnimationFrame(teTick);
+}
+$('#tePlay').addEventListener('click', () => (TE.playing ? tePause() : tePlay()));
+$('#teBack').addEventListener('click', () => { tePause(); teSetTime(TE.rel - frameStep()); });
+$('#teFwd').addEventListener('click', () => { tePause(); teSetTime(TE.rel + frameStep()); });
+$('#teJump').addEventListener('click', () => { tePause(); teSetTime(-0.3); });
+$$('#teRate button').forEach(b => b.addEventListener('click', () => {
+  TE.rate = Number(b.dataset.rate); $$('#teRate button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  for (const s of Object.values(TV)) if (teVideoActive(s)) s.video.playbackRate = clamp(TE.rate * s.slow, 0.0625, 16);
+}));
+{
+  const tl = $('#teTimeline');
+  const sc = (e) => { const r = tl.getBoundingClientRect(); const [lo0, hi0] = relRange(); const [lo, hi] = TE.zoom ? [Math.max(lo0, -0.5), Math.min(hi0, 0.6)] : [lo0, hi0]; teSetTime(lo + clamp((e.clientX - r.left) / r.width, 0, 1) * (hi - lo)); };
+  tl.addEventListener('pointerdown', (e) => { tePause(); tl.setPointerCapture(e.pointerId); sc(e); });
+  tl.addEventListener('pointermove', (e) => { if (tl.hasPointerCapture(e.pointerId)) sc(e); });
+  $('#teChart').addEventListener('click', (e) => { const r = e.currentTarget.getBoundingClientRect(); const u = (e.clientX - r.left - 40) / (r.width - 50); if (u < 0 || u > 1) return; const [lo0, hi0] = relRange(); const [lo, hi] = TE.zoom ? [Math.max(lo0, -0.5), Math.min(hi0, 0.6)] : [lo0, hi0]; tePause(); teSetTime(lo + u * (hi - lo)); });
+}
+for (const s of Object.values(TV)) {
+  s.video.addEventListener('seeked', () => { if (!S.busy && uiMode === 'te') drawTeView(s); });
+  $('.cancel', s.pane).addEventListener('click', () => { cancelFlag = true; });
+  s.canvas.addEventListener('click', (e) => onTeTap(s, e));
+  s.slowSel.addEventListener('change', () => onSlowChange(s));
+}
+
+// ---- 読み込み ----
+function estimateFps(video) {
+  return new Promise((res) => {
+    if (!('requestVideoFrameCallback' in video)) { res(30); return; }
+    const ts = []; let done = false;
+    const fin = () => {
+      if (done) return; done = true;
+      try { video.pause(); } catch (e) { /* なし */ }
+      video.playbackRate = 1;
+      const d = []; for (let i = 1; i < ts.length; i++) { const x = ts[i] - ts[i - 1]; if (x > 1e-4) d.push(x); }
+      if (d.length < 3) { res(30); return; }
+      d.sort((a, b) => a - b);
+      const f = 1 / d[Math.floor(d.length * 0.2)];
+      let best = 30, bd = Infinity;
+      for (const c of [24, 25, 30, 48, 50, 60, 90, 100, 120, 180, 240, 480]) { const e = Math.abs(Math.log(c / f)); if (e < bd) { bd = e; best = c; } }
+      res(best);
+    };
+    const cb = (now, meta) => { ts.push(meta.mediaTime); if (!done && ts.length < 30) video.requestVideoFrameCallback(cb); else fin(); };
+    video.playbackRate = 0.25; video.muted = true;
+    video.requestVideoFrameCallback(cb);
+    video.play().catch(fin);
+    setTimeout(fin, 3500);
+  });
+}
+async function onTeFile(key, file) {
+  if (!file || S.busy) return;
+  tePause(); pause();
+  if (SH.db && !HR.id && canCreateTe()) await createHand();
+  if (TE.sample) resetTe();
+  const s = TV[key];
+  if (s.url) URL.revokeObjectURL(s.url);
+  Object.assign(s, { file, url: URL.createObjectURL(file), track: null, ph: null, phAuto: null, manualT: null, metrics: [], status: 'loading', pick: null, marks: [], calT: null, liveK: null, sampleBg: false, stage: null, flip: null, partAt: null, partShot: null, by: null, sheets: null, tile: null, error: '' });
+  s.slow = Number(s.slowSel.value) || 1;
+  renderTe();
+  const vid = s.video; vid.src = s.url; vid.muted = true; vid.playsInline = true;
+  try {
+    await new Promise((res, rej) => { const to = setTimeout(() => rej(new Error('timeout')), 20000); vid.onloadedmetadata = () => { clearTimeout(to); res(); }; vid.onerror = () => { clearTimeout(to); rej(new Error('decode')); }; vid.load(); });
+    s.w = vid.videoWidth; s.h = vid.videoHeight; s.duration = vid.duration;
+    if (!s.w || !Number.isFinite(s.duration)) throw new Error('meta');
+    s.fps = await estimateFps(vid);
+    await seekTo(vid, Math.min(0.1, s.duration / 2));
+    s.status = 'ready';
+  } catch (e) { s.status = 'error'; s.error = 'この動画は読み込めませんでした。MP4（H.264）か MOV で試してください。'; }
+  renderTe();
+}
+$('#in-yunde').addEventListener('change', (e) => { onTeFile('yunde', e.target.files[0]); e.target.value = ''; });
+$('#in-mete').addEventListener('change', (e) => { onTeFile('mete', e.target.files[0]); e.target.value = ''; });
+// 解析のあとで「時間の流れ」を変えた時は、時刻だけ直す
+function onSlowChange(s) {
+  const nv = Number(s.slowSel.value) || 1, old = s.slow;
+  if (!s.partShot || s.partShot !== HR.id || s.by === SH.uid) store.set('slow-' + s.key, String(nv));
+  if (TE.sample) { renderTeSlots(); return; }
+  s.slow = nv;
+  if (s.track && old !== nv) {
+    const f = old / nv;
+    const frames = s.track.frames.map(fr => ({ ...fr, t: fr.t * f }));
+    s.track = K.prepareClose({ kind: s.key, w: s.w, h: s.h, duration: s.duration, fps: s.fps, slow: nv, frames });
+    if (Number.isFinite(s.manualT)) s.manualT *= f;
+    if (HR.rec && HR.rec.rel && Number.isFinite(HR.rec.rel[s.key])) { HR.rec = { ...HR.rec, rel: { ...HR.rec.rel, [s.key]: HR.rec.rel[s.key] * f } }; shareHand({ rel: HR.rec.rel }); }
+    recomputeTe(true);
+    if (canShareTe() && s.partShot === HR.id) shareTePart(s.key, s, s.track.frames.map((fr, i) => ({ ...fr, i: Number.isFinite(fr.i) ? fr.i : i })), null);
+    TE.rel = clamp(TE.rel, ...relRange());
+  }
+  renderTe();
+}
+
+// ---- タップ（弓手は手の位置、馬手は目印の色） ----
+const teWork = document.createElement('canvas');
+function workFrame(s) {
+  const sc = Math.min(1, 640 / Math.max(s.w, s.h)), W = Math.max(2, Math.round(s.w * sc)), H = Math.max(2, Math.round(s.h * sc));
+  if (teWork.width !== W || teWork.height !== H) { teWork.width = W; teWork.height = H; }
+  const g = teWork.getContext('2d', { willReadFrequently: true });
+  g.drawImage(s.video, 0, 0, W, H);
+  return { img: g.getImageData(0, 0, W, H), W, H, sc };
+}
+function rgb2hsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0;
+  if (d) { if (mx === r) h = ((g - b) / d) % 6; else if (mx === g) h = (b - r) / d + 2; else h = (r - g) / d + 4; h *= 60; if (h < 0) h += 360; }
+  return [h, mx ? d / mx : 0, mx];
+}
+// 目印の色か。明るさに左右されにくい色度（r・g の割合）で比べ、くすんだ色（革や肌）は鮮やかさの下限で除く
+function pixMatch(d, i, ref) {
+  const r = d[i], g = d[i + 1], b = d[i + 2], mx = Math.max(r, g, b);
+  if (mx < ref.vmin) return false;
+  const mn = Math.min(r, g, b);
+  if (mx - mn < ref.smin * mx) return false;
+  const sum = r + g + b, dr = r / sum - ref.cr, dg = g / sum - ref.cg;
+  return dr * dr + dg * dg < ref.thr2;
+}
+function finishRef(ref, crs, cgs) {
+  ref.cr = K.median(crs); ref.cg = K.median(cgs);
+  const sat = Math.hypot(ref.cr - 1 / 3, ref.cg - 1 / 3);
+  ref.thr2 = clamp(0.3 * sat, 0.03, 0.07) ** 2;
+  ref.vmin = Math.max(30, 0.35 * ref.v * 255); ref.smin = Math.max(0.15, 0.5 * ref.s);
+  return ref;
+}
+function pixHsv(d, i) { return rgb2hsv(d[i], d[i + 1], d[i + 2]); }
+function sampleRef(fr, x, y) {
+  const d = fr.img.data, W = fr.W, H = fr.H;
+  // 指が少しずれても拾えるよう、近くで一番鮮やかな所を中心にする
+  let best = -1, cx = Math.round(x), cy = Math.round(y);
+  for (let dy = -12; dy <= 12; dy++) for (let dx = -12; dx <= 12; dx++) {
+    const r2 = dx * dx + dy * dy; if (r2 > 144) continue;
+    const px = Math.round(x + dx), py = Math.round(y + dy); if (px < 0 || py < 0 || px >= W || py >= H) continue;
+    const hsv = pixHsv(d, (py * W + px) * 4), sc = hsv[1] * Math.sqrt(hsv[2]) - r2 / 144 * 0.15;
+    if (sc > best) { best = sc; cx = px; cy = py; }
+  }
+  const c = pixHsv(d, (cy * W + cx) * 4);
+  if (c[1] < 0.3 || c[2] < 0.2) return null;
+  let cs = 0, sn = 0; const ss = [], vs = [], crs = [], cgs = [];
+  for (let dy = -6; dy <= 6; dy++) for (let dx = -6; dx <= 6; dx++) {
+    if (dx * dx + dy * dy > 36) continue;
+    const px = cx + dx, py = cy + dy; if (px < 0 || py < 0 || px >= W || py >= H) continue;
+    const i = (py * W + px) * 4, hsv = pixHsv(d, i);
+    let dh = Math.abs(hsv[0] - c[0]); if (dh > 180) dh = 360 - dh;
+    if (dh > 20 || hsv[1] < 0.6 * c[1] || hsv[2] < 0.15) continue;
+    cs += Math.cos(hsv[0] / DEGS); sn += Math.sin(hsv[0] / DEGS); ss.push(hsv[1]); vs.push(hsv[2]);
+    const sum = d[i] + d[i + 1] + d[i + 2]; crs.push(d[i] / sum); cgs.push(d[i + 1] / sum);
+  }
+  if (ss.length < 4) return null;
+  let h = Math.atan2(sn, cs) * DEGS; if (h < 0) h += 360;
+  const ref = finishRef({ h, s: K.median(ss), v: K.median(vs), r: 4 }, crs, cgs);
+  const blob = findBlob(fr.img, W, H, ref, cx, cy, 45, 0, Infinity);
+  if (!blob) return null;
+  ref.r = clamp(Math.sqrt(blob.area / Math.PI), 2.5, 40);
+  // 同じ色が目印の外にどれだけあるか（多いと追い間違えやすい）
+  let n = 0; const rr = (ref.r * 3) ** 2;
+  for (let py = 0; py < H; py += 2) for (let px = 0; px < W; px += 2) {
+    if ((px - blob.x) ** 2 + (py - blob.y) ** 2 < rr) continue;
+    if (pixMatch(d, (py * W + px) * 4, ref)) n += 4;
+  }
+  return { ref, x: blob.x, y: blob.y, clash: n > 3 * blob.area, big: blob.area > Math.PI * 40 * 40 };
+}
+const DEGS = 180 / Math.PI;
+// 色が近い画素の塊を探す。予想の位置に近く大きい塊を選ぶ
+function findBlob(img, W, H, ref, cx, cy, R, minA, maxA) {
+  const x0 = Math.max(0, Math.floor(cx - R)), x1 = Math.min(W - 1, Math.ceil(cx + R)), y0 = Math.max(0, Math.floor(cy - R)), y1 = Math.min(H - 1, Math.ceil(cy + R));
+  const ww = x1 - x0 + 1, hh = y1 - y0 + 1; if (ww < 2 || hh < 2) return null;
+  const d = img.data, mask = new Uint8Array(ww * hh);
+  for (let y = 0; y < hh; y++) for (let x = 0; x < ww; x++) {
+    if (pixMatch(d, ((y0 + y) * W + (x0 + x)) * 4, ref)) mask[y * ww + x] = 1;
+  }
+  const minArea = minA != null ? minA : Math.max(3, 0.18 * Math.PI * ref.r * ref.r);
+  const maxArea = maxA != null ? maxA : Math.max(60, 14 * Math.PI * ref.r * ref.r); // ゆがけなど広い所に同じ色があっても、目印とは見なさない
+  const stack = new Int32Array(ww * hh); let best = null, bestScore = -1;
+  for (let i0 = 0; i0 < ww * hh; i0++) {
+    if (mask[i0] !== 1) continue;
+    let top = 0, area = 0, sx = 0, sy = 0; stack[top++] = i0; mask[i0] = 2;
+    while (top) {
+      const i = stack[--top], x = i % ww, y = (i / ww) | 0; area++; sx += x; sy += y;
+      if (x > 0 && mask[i - 1] === 1) { mask[i - 1] = 2; stack[top++] = i - 1; }
+      if (x < ww - 1 && mask[i + 1] === 1) { mask[i + 1] = 2; stack[top++] = i + 1; }
+      if (y > 0 && mask[i - ww] === 1) { mask[i - ww] = 2; stack[top++] = i - ww; }
+      if (y < hh - 1 && mask[i + ww] === 1) { mask[i + ww] = 2; stack[top++] = i + ww; }
+    }
+    if (area < minArea || area > maxArea) continue;
+    const bx = x0 + sx / area, by = y0 + sy / area, dist = Math.hypot(bx - cx, by - cy);
+    const score = area / Math.pow(1 + dist / (2 * ref.r + 4), 2);
+    if (score > bestScore) { bestScore = score; best = { x: bx, y: by, area }; }
+  }
+  return best;
+}
+function onTeTap(s, e) {
+  if (s.status !== 'ready') return;
+  const r = s.canvas.getBoundingClientRect();
+  const p = { x: (e.clientX - r.left) / r.width * s.w, y: (e.clientY - r.top) / r.height * s.h };
+  if (s.key === 'yunde') { s.pick = p; renderTeMsg(s); drawTeView(s); return; }
+  if (s.marks.length >= 3) return;
+  if (s.marks.length && Math.abs(s.video.currentTime - s.calT) > 1e-3) { s.marks = []; }
+  const fr = workFrame(s);
+  const got = sampleRef(fr, p.x * fr.sc, p.y * fr.sc);
+  const span = $('span', s.ctl);
+  if (!got) { if (span) span.textContent = `${MK[s.marks.length].name}の目印の色をうまく取れませんでした。目印の真ん中をタップしてください。`; return; }
+  s.calT = s.video.currentTime;
+  s.marks.push({ x: got.x / fr.sc, y: got.y / fr.sc, ref: got.ref, sc: fr.sc, clash: got.clash || got.big });
+  renderTeSlots(); renderTeMsg(s); drawTeView(s);
+}
+
+// ---- 解析 ----
+let handModel = null;
+async function ensureHandModel(onStage) {
+  await ensureTf(onStage);
+  if (handModel) return handModel;
+  onStage('手の検出モデルを読み込んでいます');
+  handModel = await loadShardModel('handlandmark-full.json');
+  const z = tf.zeros([1, 224, 224, 3]); const r = handModel.execute(z, ['Identity:0', 'Identity_1:0']); await Promise.all(r.map(x => x.data())); tf.dispose([z, ...r]);
+  return handModel;
+}
+const hCrop = document.createElement('canvas'); hCrop.width = 224; hCrop.height = 224;
+async function handInfer(src, Cc, Sz, theta) {
+  const g = hCrop.getContext('2d'), k = 224 / Sz;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.fillStyle = '#000'; g.fillRect(0, 0, 224, 224);
+  g.translate(112, 112); g.scale(k, k); g.rotate(-theta); g.translate(-Cc.x, -Cc.y);
+  try { g.drawImage(src, 0, 0); } catch (e) { /* 描けないコマ */ }
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  const input = tf.tidy(() => tf.browser.fromPixels(hCrop).toFloat().div(255).expandDims(0));
+  const [lm, pr] = handModel.execute(input, ['Identity:0', 'Identity_1:0']);
+  const d = await lm.data(), p = (await pr.data())[0];
+  tf.dispose([input, lm, pr]);
+  const c = Math.cos(theta), sn = Math.sin(theta), out = new Array(63);
+  for (let j = 0; j < 21; j++) {
+    const u = (d[j * 3] - 112) / k, v = (d[j * 3 + 1] - 112) / k;
+    out[j * 3] = Cc.x + u * c - v * sn; out[j * 3 + 1] = Cc.y + u * sn + v * c; out[j * 3 + 2] = d[j * 3 + 2] / k;
+  }
+  return { k: out, p: p >= 0 && p <= 1 ? p : 1 / (1 + Math.exp(-p)) };
+}
+function handBox(k) {
+  const theta = Math.atan2(k[28] - k[1], k[27] - k[0]) + Math.PI / 2;
+  const c = Math.cos(-theta), sn = Math.sin(-theta);
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (let j = 0; j < 21; j++) { const rx = k[j * 3] * c - k[j * 3 + 1] * sn, ry = k[j * 3] * sn + k[j * 3 + 1] * c; x0 = Math.min(x0, rx); x1 = Math.max(x1, rx); y0 = Math.min(y0, ry); y1 = Math.max(y1, ry); }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  return { C: { x: cx * Math.cos(theta) - cy * Math.sin(theta), y: cx * Math.sin(theta) + cy * Math.cos(theta) }, S: Math.max(40, Math.max(x1 - x0, y1 - y0) * 1.9), theta };
+}
+async function handSearch(src, Cc, M, sizes) {
+  let best = null;
+  for (const f of sizes) for (const th of [0, Math.PI / 2, Math.PI, -Math.PI / 2]) {
+    const r = await handInfer(src, Cc, f * M, th);
+    if (!best || r.p > best.r.p) best = { r, C: Cc, S: f * M, theta: th };
+  }
+  if (best.r.p > 0.25) for (let i = 0; i < 2; i++) { const b = handBox(best.r.k); const r = await handInfer(src, b.C, b.S, b.theta); if (r.p >= best.r.p * 0.9) best = { r, ...b }; }
+  return best;
+}
+async function runHandPass(s, vtimes, setProg, base, span, startBox) {
+  const vid = s.video, M = Math.min(s.w, s.h);
+  let box = startBox, lastGood = startBox, miss = 0; const out = [], t0 = performance.now();
+  for (let i = 0; i < vtimes.length; i++) {
+    if (cancelFlag) throw new Error('cancel');
+    await seekTo(vid, vtimes[i]);
+    let r;
+    if (!box) { const b = await handSearch(vid, s.pick || { x: s.w / 2, y: s.h / 2 }, M, [0.3, 0.5, 0.75]); r = b.r; box = b; }
+    else r = await handInfer(vid, box.C, box.S, box.theta);
+    // 見失った時の探し直しは重いので、続けて見失っている間は数コマおきにする
+    if (r.p < 0.4 && miss % 4 === 0) { const ref = lastGood || box; const b = await handSearch(vid, ref.C, M, [ref.S / M, 0.5]); if (b.r.p > r.p) r = b.r; }
+    if (r.p >= 0.4) { box = handBox(r.k); lastGood = box; miss = 0; } else miss++;
+    out.push({ t: vtimes[i] / s.slow, k: r.k, p: r.p });
+    if (s.thumbs) s.thumbs.add(vid);
+    s.liveK = []; for (let j = 0; j < 21; j++) s.liveK.push({ x: r.k[j * 3], y: r.k[j * 3 + 1] });
+    if (i % 3 === 0) drawTeView(s);
+    const el = (performance.now() - t0) / 1000; setProg(base + span * (i + 1) / vtimes.length, el / (i + 1) * (vtimes.length - i - 1));
+  }
+  return { out, box };
+}
+function makeTracker(refs, init) {
+  const st = init.map(p => ({ x: p.x, y: p.y, vx: 0, vy: 0, t: null, miss: 0 }));
+  return (fr, vt) => {
+    const out = [];
+    for (let i = 0; i < 3; i++) {
+      const r = refs[i], q = st[i];
+      const dtv = q.t == null ? 0 : vt - q.t;
+      const px = q.x + q.vx * dtv, py = q.y + q.vy * dtv;
+      const base = Math.max(4 * r.r, 18);
+      const R = clamp(base * Math.pow(1.7, q.miss) + Math.hypot(q.vx, q.vy) * Math.abs(dtv) * 0.6, base, Math.max(fr.W, fr.H) * 0.35);
+      const hit = findBlob(fr.img, fr.W, fr.H, r, px, py, R);
+      if (hit) {
+        if (q.t != null && Math.abs(dtv) > 1e-6) { q.vx = 0.5 * q.vx + 0.5 * (hit.x - q.x) / dtv; q.vy = 0.5 * q.vy + 0.5 * (hit.y - q.y) / dtv; }
+        q.x = hit.x; q.y = hit.y; q.t = vt; q.miss = 0; out.push(hit.x / fr.sc, hit.y / fr.sc, 1);
+      } else { q.miss = Math.min(q.miss + 1, 4); out.push(px / fr.sc, py / fr.sc, 0); }
+    }
+    return out;
+  };
+}
+async function runMarkPass(s, vtimes, init, setProg, base, span) {
+  const fr0 = workFrame(s);
+  const refs = s.marks.map(m => m.ref);
+  const step = makeTracker(refs, init.map(p => ({ x: p.x * fr0.sc, y: p.y * fr0.sc })));
+  const out = [], t0 = performance.now();
+  for (let i = 0; i < vtimes.length; i++) {
+    if (cancelFlag) throw new Error('cancel');
+    await seekTo(s.video, vtimes[i]);
+    const fr = workFrame(s);
+    const m = step(fr, vtimes[i]);
+    out.push({ t: vtimes[i] / s.slow, m });
+    if (s.thumbs) s.thumbs.add(s.video);
+    s.liveK = [{ x: m[0], y: m[1] }, { x: m[3], y: m[4] }, { x: m[6], y: m[7] }];
+    if (i % 3 === 0) drawTeView(s);
+    const el = (performance.now() - t0) / 1000; setProg(base + span * (i + 1) / vtimes.length, el / (i + 1) * (vtimes.length - i - 1));
+  }
+  return out;
+}
+const nearest = (arr, t) => arr.reduce((a, f) => (Math.abs(f.t - t) < Math.abs(a.t - t) ? f : a), arr[0]);
+async function analyzeYunde(s, setProg, stage) {
+  await ensureHandModel(stage);
+  const vstep = Math.max(1 / s.fps, s.slow / 15), times = [];
+  for (let v = 0.02; v < s.duration - 0.01; v += vstep) times.push(v);
+  const p1 = await runHandPass(s, times, setProg, 0, 0.55, null);
+  let all = p1.out;
+  if (all.filter(f => f.p >= 0.4).length < all.length * 0.3) return all; // 手が写っていない。細かい解析はしない
+  const tr = K.prepareClose({ kind: 'yunde', w: s.w, h: s.h, duration: s.duration, frames: all.map(f => ({ t: f.t, k: f.k, p: f.p })) });
+  const ph = K.detectClosePhases(tr);
+  if (ph) {
+    const dense = [], have = new Set(times.map(v => Math.round(v * s.fps)));
+    for (let v = Math.max(0, (ph.tHanare - 0.45) * s.slow); v <= Math.min(s.duration - 0.01, (ph.tHanare + 0.55) * s.slow); v += 1 / s.fps) if (!have.has(Math.round(v * s.fps))) dense.push(v);
+    const near = nearest(all, dense.length ? dense[0] / s.slow : ph.tHanare);
+    const p2 = await runHandPass(s, dense, setProg, 0.55, 0.45, handBox(near.k));
+    all = all.concat(p2.out);
+  }
+  return all;
+}
+async function analyzeMete(s, setProg) {
+  const vstep = Math.max(1 / s.fps, s.slow / 15), tc = s.calT || 0;
+  const fwd = [], bwd = [];
+  for (let v = tc; v < s.duration - 0.01; v += vstep) fwd.push(v);
+  for (let v = tc - vstep; v >= 0; v -= vstep) bwd.push(v);
+  const init = s.marks.map(m => ({ x: m.x, y: m.y }));
+  const n1 = fwd.length + bwd.length;
+  let all = await runMarkPass(s, fwd, init, setProg, 0, 0.55 * fwd.length / n1);
+  all = all.concat(await runMarkPass(s, bwd, init, setProg, 0.55 * fwd.length / n1, 0.55 * bwd.length / n1));
+  const tr = K.prepareClose({ kind: 'mete', w: s.w, h: s.h, duration: s.duration, frames: all.map(f => ({ t: f.t, m: f.m })) });
+  const ph = K.detectClosePhases(tr);
+  if (ph) {
+    const have = new Set(fwd.concat(bwd).map(v => Math.round(v * s.fps))), dense = [];
+    for (let v = Math.max(0, (ph.tHanare - 0.45) * s.slow); v <= Math.min(s.duration - 0.01, (ph.tHanare + 0.55) * s.slow); v += 1 / s.fps) if (!have.has(Math.round(v * s.fps))) dense.push(v);
+    if (dense.length) {
+      const st = nearest(all, dense[0] / s.slow);
+      const init2 = [0, 1, 2].map(i => ({ x: st.m[i * 3], y: st.m[i * 3 + 1] }));
+      all = all.concat(await runMarkPass(s, dense, init2, setProg, 0.55, 0.45));
+    }
+  }
+  return all;
+}
+async function startTeAnalysis(key) {
+  const s = TV[key];
+  if (S.busy || s.status !== 'ready' || (key === 'mete' && s.marks.length < 3)) return;
+  tePause(); pause();
+  S.busy = true; cancelFlag = false; syncModeBtns();
+  s.status = 'analyzing'; s.progress = 0; s.liveK = null; renderTe();
+  const bar = $('.bar i', s.prog), txt = $('.ptxt', s.prog);
+  const stage = (t) => { txt.textContent = t; };
+  const setProg = (p, rest) => { s.progress = p; bar.style.width = (p * 100).toFixed(1) + '%'; txt.textContent = `${s.label}を解析中 ${Math.round(p * 100)}% ${Number.isFinite(rest) ? (rest > 90 ? `あと約${Math.ceil(rest / 60)}分` : `あと約${Math.max(1, Math.round(rest))}秒`) : ''}`; renderTeSlots(); };
+  try {
+    s.thumbs = canShareTe() ? new ThumbSheets(s.w, s.h) : null;
+    const all = key === 'yunde' ? await analyzeYunde(s, setProg, stage) : await analyzeMete(s, setProg);
+    all.forEach((f, i) => { f.i = i; });
+    const frames = all.map(f => (key === 'yunde' ? { t: f.t, k: f.k, p: f.p, i: f.i } : { t: f.t, m: f.m, i: f.i }));
+    const okRate = key === 'yunde' ? all.reduce((a, f) => a + (f.p > 0.4 ? 1 : 0), 0) / all.length : all.reduce((a, f) => a + (f.m[2] && f.m[5] && f.m[8] ? 1 : 0), 0) / all.length;
+    if (!(okRate >= 0.35)) {
+      s.status = 'error';
+      s.error = key === 'yunde' ? '手をうまく見つけられませんでした。弓手をもっと大きく写すか、解析の前に手をタップしてください。' : '目印をうまく追えませんでした。目印がはっきり写るように撮り直すか、目印の真ん中をタップし直してください。';
+    } else {
+      s.track = K.prepareClose({ kind: key, w: s.w, h: s.h, duration: s.duration, fps: s.fps, slow: s.slow, frames });
+      s.status = 'done'; s.manualT = null; s.liveK = null;
+      recomputeTe(true);
+      if (canShareTe()) { txt.textContent = '結果を共有しています'; await shareTePart(key, s, frames, s.thumbs); }
+    }
+  } catch (e) {
+    s.liveK = null;
+    if (e && e.message === 'cancel') s.status = 'ready';
+    else { console.error(e); s.status = 'error'; s.error = e && (e.message === 'script' || e.message === 'model') ? '解析の部品を読み込めませんでした。通信を確認して、もう一度お試しください。' : '解析中に問題が起きました。もう一度お試しください。'; }
+  }
+  s.thumbs = null; S.busy = false; cancelFlag = false; syncModeBtns();
+  if (s.ph) TE.rel = -0.3;
+  renderTe(); teSetTime(TE.rel);
+}
+
+// ---- 共有用の形 ----
+function teEncode(key, frames) {
+  const n = frames.length, t = new Float32Array(n), ti = new Uint16Array(n), p = new Uint8Array(n);
+  const C = key === 'yunde' ? 63 : 6, k = new Int16Array(n * C);
+  frames.forEach((f, i) => {
+    t[i] = f.t; ti[i] = f.i;
+    if (key === 'yunde') { p[i] = clamp(Math.round(f.p * 255), 0, 255); for (let j = 0; j < 63; j++) k[i * 63 + j] = clamp(Math.round(f.k[j] * 4), -32767, 32767); }
+    else { p[i] = (f.m[2] ? 1 : 0) | (f.m[5] ? 2 : 0) | (f.m[8] ? 4 : 0); for (let j = 0; j < 3; j++) { k[i * 6 + j * 2] = clamp(Math.round(f.m[j * 3] * 4), -32767, 32767); k[i * 6 + j * 2 + 1] = clamp(Math.round(f.m[j * 3 + 1] * 4), -32767, 32767); } }
+  });
+  return { n, t: b64FromBytes(new Uint8Array(t.buffer)), k: b64FromBytes(new Uint8Array(k.buffer)), p: b64FromBytes(p), ti: b64FromBytes(new Uint8Array(ti.buffer)) };
+}
+function teDecode(key, d) {
+  const t = new Float32Array(bytesFromB64(d.t).buffer), k = new Int16Array(bytesFromB64(d.k).buffer), p = bytesFromB64(d.p || '');
+  const ti = d.ti ? new Uint16Array(bytesFromB64(d.ti).buffer) : null, out = [];
+  for (let i = 0; i < t.length; i++) {
+    if (key === 'yunde') { const a = new Array(63); for (let j = 0; j < 63; j++) a[j] = k[i * 63 + j] / 4; out.push({ t: t[i], k: a, p: (p[i] || 0) / 255, i: ti ? ti[i] : i }); }
+    else { const m = []; for (let j = 0; j < 3; j++) m.push(k[i * 6 + j * 2] / 4, k[i * 6 + j * 2 + 1] / 4, (p[i] >> j) & 1); out.push({ t: t[i], m, i: ti ? ti[i] : i }); }
+  }
+  return out;
+}
+// 共有された結果を読み込む（相手の端末で）
+function teLoadPart(key, part, frames, shotId) {
+  const s = TV[key];
+  if (s.url) { URL.revokeObjectURL(s.url); s.url = null; s.file = null; s.video.removeAttribute('src'); }
+  const tr = K.prepareClose({ kind: key, w: part.w, h: part.h, duration: part.duration, fps: part.fps, slow: part.slow, frames });
+  Object.assign(s, { track: tr, status: 'done', w: part.w, h: part.h, duration: part.duration, slow: part.slow || 1, fps: part.fps || 30, sampleBg: false, stage: null, partAt: part.at, partShot: shotId, by: part.dev || part.by, flip: makeFlip(part, frames, shotId), liveK: null, manualT: null, marks: [], sheets: part.sheets || null, tile: part.tile || null, error: '' });
+  s.slowSel.value = String(s.slow);
+}
+function teSummary() {
+  const L = ['射形分析帳・手の内とひねり' + (HR.id && HR.rec ? `（${fmtShot(HR.rec)}）` : '')];
+  for (const [g, name] of TGROUPS) {
+    const rows = TKEYS.flatMap(k => TV[k].metrics).filter(m => m.group === g); if (!rows.length) continue;
+    L.push(`【${name}】`);
+    for (const m of rows) L.push(`・${m.label}: ${m.display}${m.verdict ? ' … ' + m.verdict : ''}`);
+  }
+  if (TE.sample) L.push('※合成サンプルの結果です');
+  return L.join('\n');
+}
+$('#teCopy').addEventListener('click', () => {
+  const text = teSummary(), msg = $('#teCopyMsg'), fb = $('#teCopyFallback');
+  const showFb = () => { fb.hidden = false; fb.value = text; fb.focus(); fb.select(); msg.textContent = 'コピーできなかったので、下の文章を選択しました。'; };
+  try { navigator.clipboard.writeText(text).then(() => { msg.textContent = 'コピーしました'; fb.hidden = true; }, showFb); } catch (e) { showFb(); }
+});
+{
+  const sp = $('#spacing'); sp.value = TE.spacingCm;
+  sp.addEventListener('change', () => { const v = Number(sp.value); if (v >= 2 && v <= 12) { TE.spacingCm = v; store.set('spacing', v); recomputeTe(false); renderTe(); } else sp.value = TE.spacingCm; });
+}
+
+
+
 // ---------- まとめて描き直す ----------
 function renderAll() {
-  $('#sampleBanner').hidden = !S.sample;
+  syncBanner();
   renderCoach();
   for (const v of Object.values(V)) {
     const hasVid = !S.sample && v.url && v.status !== 'error';
@@ -1834,9 +2966,11 @@ function sideFacingSign() {
   return d >= 0 ? 1 : -1;
 }
 let rsT = 0;
-window.addEventListener('resize', () => { clearTimeout(rsT); rsT = setTimeout(() => { layoutFrames(); drawAll(); drawTimeline(); drawChart(); drawPhoto(); }, 120); });
+window.addEventListener('resize', () => { clearTimeout(rsT); rsT = setTimeout(() => { if (uiMode === 'te') { layoutTe(); drawTeAll(); } else { layoutFrames(); drawAll(); drawTimeline(); drawChart(); drawPhoto(); } }, 120); });
 
 loadSample();
+loadTeSample();
+setMode(store.get('mode') === 'te' ? 'te' : 'shakei');
 initShared();
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawAll(); drawTimeline(); drawChart(); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { drawAll(); drawTimeline(); drawChart(); drawTeAll(); });
 })();

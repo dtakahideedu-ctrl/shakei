@@ -715,6 +715,340 @@ const Kyu = (() => {
   }
 
 
-  return { KP, NK, EDGES, PHASES, KASUMI, DT, prepareTrack, kpAt, kpAtGrid, gIndex, detectPhases, syncOffset, evenPhases, phaseAt, computeMetrics, fuseSetup, pose3dAt, targetStats, zoneOf, dirWords, makeSample, median, clamp, tilt };
+
+  // ---------- 手の内・ひねり（弓手と馬手の接写） ----------
+  // 時刻はすべて「実時間の秒」。スロー撮影の動画は、動画の時刻 ÷ スロー倍率 で実時間に直してから渡す
+  // 弓手: 手の 21 点 {t, k:[x,y,z]*21, p}   0 手首, 1-4 親指, 5-8 人差し指, 9-12 中指, 13-16 薬指, 17-20 小指
+  // 馬手: 目印 3 つ {t, m:[x,y,ok]*3}       0 黄（甲・人差し指側）, 1 青（甲・小指側）, 2 緑（手首）
+  const HAND_EDGES = [[0, 1, 't'], [1, 2, 't'], [2, 3, 't'], [3, 4, 't'], [0, 5, 'p'], [5, 6, 'f'], [6, 7, 'f'], [7, 8, 'f'], [5, 9, 'p'], [9, 10, 'f'], [10, 11, 'f'], [11, 12, 'f'], [9, 13, 'p'], [13, 14, 'f'], [14, 15, 'f'], [15, 16, 'f'], [13, 17, 'p'], [0, 17, 'p'], [17, 18, 'f'], [18, 19, 'f'], [19, 20, 'f']];
+  const TPH = [{ key: 'pre', name: '引分け' }, { key: 'kai', name: '会' }, { key: 'hanare', name: '離れ' }, { key: 'zanshin', name: '残心' }];
+  function unwrapDeg(arr) {
+    const out = new Float32Array(arr.length); let off = 0;
+    for (let i = 0; i < arr.length; i++) {
+      if (i) { const d = arr[i] + off - out[i - 1]; if (d > 180) off -= 360; else if (d < -180) off += 360; }
+      out[i] = arr[i] + off;
+    }
+    return out;
+  }
+  function prepareClose(track) {
+    const yunde = track.kind === 'yunde';
+    const fr = track.frames.filter(f => Number.isFinite(f.t)).sort((a, b) => a.t - b.t);
+    const frames = [];
+    for (const f of fr) if (!frames.length || f.t - frames[frames.length - 1].t > 1e-5) frames.push(f);
+    track.frames = frames;
+    const n = frames.length, C = yunde ? 63 : 6;
+    const val = yunde ? (f, j) => f.k[j] : (f, j) => f.m[(j >> 1) * 3 + (j & 1)];
+    const wt = yunde ? (f) => Math.max(f.p, 0.02) * Math.max(f.p, 0.02) : null;
+    const okj = (f, j) => (f.m[(j >> 1) * 3 + 2] ? 1 : 0.0005);
+    // 時間の細かさ: 一番細かく解析した所のコマの間隔
+    const gaps = [];
+    for (let i = 1; i < n; i++) gaps.push(frames[i].t - frames[i - 1].t);
+    let dt = clamp(percentile(gaps, 0.1) || 1 / 30, 1 / 480, 1 / 30);
+    const t0 = n ? frames[0].t : 0, t1 = n ? frames[n - 1].t : 0;
+    if ((t1 - t0) / dt > 20000) dt = (t1 - t0) / 20000;
+    const sigma = Math.max(0.01, dt * 1.3), win = sigma * 2.5;
+    const sm = new Array(n);
+    let lo = 0;
+    for (let i = 0; i < n; i++) {
+      const t = frames[i].t;
+      while (frames[lo].t < t - win) lo++;
+      const out = new Float32Array(C + 1), acc = new Float64Array(C), sw = new Float64Array(C);
+      let cs = 0, cg = 0;
+      for (let q = lo; q < n && frames[q].t <= t + win; q++) {
+        const d = frames[q].t - t, g = Math.exp(-d * d / (2 * sigma * sigma)), f = frames[q];
+        if (yunde) { const w = g * wt(f); for (let j = 0; j < C; j++) { acc[j] += f.k[j] * w; sw[j] += w; } cs += f.p * g; }
+        else { for (let j = 0; j < C; j++) { const w = g * okj(f, j); acc[j] += val(f, j) * w; sw[j] += w; } cs += (f.m[2] + f.m[5] + f.m[8]) / 3 * g; }
+        cg += g;
+      }
+      for (let j = 0; j < C; j++) out[j] = acc[j] / sw[j];
+      out[C] = cs / cg;
+      sm[i] = out;
+    }
+    track.sm = sm; track.times = frames.map(f => f.t);
+    const G = Math.max(1, Math.floor((t1 - t0) / dt) + 1);
+    const gt = new Float32Array(G), V = [];
+    for (let j = 0; j <= C; j++) V.push(new Float32Array(G));
+    let p = 0;
+    for (let g = 0; g < G; g++) {
+      const t = t0 + g * dt; gt[g] = t;
+      while (p < n - 2 && track.times[p + 1] < t) p++;
+      const a = sm[p], b = sm[Math.min(p + 1, n - 1)], ta = track.times[p], tb = track.times[Math.min(p + 1, n - 1)];
+      const u = tb > ta ? clamp((t - ta) / (tb - ta), 0, 1) : 0;
+      for (let j = 0; j <= C; j++) V[j][g] = a[j] + (b[j] - a[j]) * u;
+    }
+    track.grid = { t0, G, gt, V, dt, C };
+    // 手の大きさの基準、中心の速さ、向きの回る速さ
+    const X = (j, g) => V[j * (yunde ? 3 : 2)][g], Y = (j, g) => V[j * (yunde ? 3 : 2) + 1][g];
+    const cx = new Float32Array(G), cy = new Float32Array(G), oriRaw = new Float32Array(G), sizes = [];
+    for (let g = 0; g < G; g++) {
+      if (yunde) {
+        cx[g] = (X(0, g) + X(5, g) + X(9, g) + X(13, g) + X(17, g)) / 5; cy[g] = (Y(0, g) + Y(5, g) + Y(9, g) + Y(13, g) + Y(17, g)) / 5;
+        oriRaw[g] = Math.atan2(-(Y(17, g) - Y(5, g)), X(17, g) - X(5, g)) * DEG;
+        if (V[C][g] > 0.5) sizes.push(Math.hypot(X(9, g) - X(0, g), Y(9, g) - Y(0, g)));
+      } else {
+        cx[g] = (X(0, g) + X(1, g) + X(2, g)) / 3; cy[g] = (Y(0, g) + Y(1, g) + Y(2, g)) / 3;
+        oriRaw[g] = Math.atan2(-(Y(1, g) - Y(0, g)), X(1, g) - X(0, g)) * DEG;
+        if (V[C][g] > 0.6) sizes.push(Math.hypot(X(1, g) - X(0, g), Y(1, g) - Y(0, g)));
+      }
+    }
+    let S = median(sizes);
+    if (!Number.isFinite(S) || S < 3) S = Math.min(track.w, track.h) * 0.12;
+    const ori = unwrapDeg(oriRaw);
+    const hw = Math.max(1, Math.round(0.025 / dt));
+    const sp = new Float32Array(G), av = new Float32Array(G);
+    for (let g = 0; g < G; g++) {
+      const a = Math.max(0, g - hw), b = Math.min(G - 1, g + hw), d = (b - a) * dt || 1;
+      sp[g] = Math.hypot(cx[b] - cx[a], cy[b] - cy[a]) / d / S;
+      av[g] = Math.abs(ori[b] - ori[a]) / d; // 度/秒
+    }
+    track.S = S; track.sig = { cx, cy, ori, sp, av };
+    track.dt = dt;
+    return track;
+  }
+  function cIndex(track, t) { const gr = track.grid; return clamp(Math.round((t - gr.t0) / gr.dt), 0, gr.G - 1); }
+  function closeGrid(track, g) {
+    const gr = track.grid, V = gr.V;
+    if (track.kind === 'yunde') { const o = []; for (let j = 0; j < 21; j++) o.push({ x: V[j * 3][g], y: V[j * 3 + 1][g], z: V[j * 3 + 2][g] }); o.p = V[63][g]; return o; }
+    const o = []; for (let j = 0; j < 3; j++) o.push({ x: V[j * 2][g], y: V[j * 2 + 1][g] }); o.p = V[6][g]; return o;
+  }
+  function closeAt(track, t) {
+    const ts = track.times, n = ts.length;
+    if (!n || t < ts[0] - 0.1 || t > ts[n - 1] + 0.1) return null;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (ts[m] <= t) lo = m; else hi = m; }
+    const a = track.sm[lo], b = track.sm[hi], u = ts[hi] > ts[lo] ? clamp((t - ts[lo]) / (ts[hi] - ts[lo]), 0, 1) : 0;
+    const L = (j) => a[j] + (b[j] - a[j]) * u;
+    if (track.kind === 'yunde') { const o = []; for (let j = 0; j < 21; j++) o.push({ x: L(j * 3), y: L(j * 3 + 1), z: L(j * 3 + 2) }); o.p = L(63); return o; }
+    const o = []; for (let j = 0; j < 3; j++) o.push({ x: L(j * 2), y: L(j * 2 + 1) }); o.p = L(6);
+    // 目印ごとの見えている度合い（最寄りのコマ）
+    const f = track.frames[u < 0.5 ? lo : hi];
+    o.ok = [f.m[2], f.m[5], f.m[8]];
+    return o;
+  }
+  // 離れ: 手が急に動いたり回ったりした瞬間。会: その前に手が止まっている区間
+  function detectClosePhases(track) {
+    const gr = track.grid, { G, gt, dt } = gr, { sp, av } = track.sig;
+    if (G < 10) return null;
+    const sc = new Float32Array(G);
+    for (let g = 0; g < G; g++) sc[g] = sp[g] + 0.5 * av[g] / DEG;
+    const g0 = Math.min(G - 1, Math.round(0.3 / dt));
+    let iP = -1, best = 0;
+    for (let g = g0; g < G; g++) if (sc[g] > best) { best = sc[g]; iP = g; }
+    if (iP < 0 || best < 1.2) return null;
+    let iH = iP; while (iH > 0 && sc[iH - 1] > best * 0.3) iH--;
+    const thr = Math.max(0.35, percentile(Array.from(sc), 0.1) * 3);
+    let g = iH - 1, over = 0, iK = iH;
+    const back = Math.round(0.2 / dt);
+    while (g > 0 && sc[g] > thr && iH - g < back) g--;
+    for (; g >= 0; g--) {
+      if (sc[g] < thr) { over = 0; iK = g; } else if (++over * dt > 0.25) break;
+      if ((iH - g) * dt > 12) break;
+    }
+    const T = (i) => gt[clamp(i, 0, G - 1)];
+    return { tStart: gt[0], tKai: T(iK), tHanare: T(iH), tEnd: gt[G - 1], auto: true };
+  }
+  function closePhaseAt(ph, t) {
+    if (!ph) return -1;
+    if (t < ph.tKai) return 0;
+    if (t < ph.tHanare) return 1;
+    if (t < ph.tHanare + 0.3) return 2;
+    return 3;
+  }
+  // 区間の中央値・標準偏差・最大値
+  function cmed(track, t0, t1, fn) { if (!(t1 > t0)) return NaN; const v = []; for (let g = cIndex(track, t0); g <= cIndex(track, t1); g++) { const x = fn(g); if (Number.isFinite(x)) v.push(x); } return median(v); }
+  function csd(track, t0, t1, fn) { const v = []; for (let g = cIndex(track, t0); g <= cIndex(track, t1); g++) { const x = fn(g); if (Number.isFinite(x)) v.push(x); } if (v.length < 2) return NaN; const m = v.reduce((a, b) => a + b, 0) / v.length; return Math.sqrt(v.reduce((a, b) => a + (b - m) * (b - m), 0) / v.length); }
+  function cmax(track, t0, t1, fn) { let m = -Infinity, at = NaN; for (let g = cIndex(track, t0); g <= cIndex(track, t1); g++) { const x = fn(g); if (x > m) { m = x; at = track.grid.gt[g]; } } return { v: m, t: at }; }
+  const ms = (s) => Math.round(s * 1000);
+  // 窓の取り方（会の前半・後半、離れの後）
+  function windows(ph) {
+    const span = Math.max(0.2, ph.tHanare - ph.tKai);
+    const kA = ph.tKai + span * 0.15, kB = Math.max(kA + 0.02, ph.tHanare - Math.min(0.12, span * 0.2));
+    return { kA, kB, early: [kA, kA + (kB - kA) * 0.25], late: [kB - (kB - kA) * 0.25, kB], pre: [ph.tHanare - 0.06, ph.tHanare - 0.015], post: [Math.min(ph.tEnd, ph.tHanare + 0.15), Math.min(ph.tEnd, ph.tHanare + 0.25)] };
+  }
+  const fineEnough = (track, need) => track.dt <= need + 1e-9;
+
+  // 弓手。sT: 的の方向が画面の +x なら 1（会で親指の先がある側）
+  function yundeMetrics(track, ph, opt = {}) {
+    const M = [];
+    if (!track || !ph) return M;
+    const add = (o) => { o.side = 'yunde'; M.push(o); };
+    const W = windows(ph), { kA, kB } = W;
+    const vals = [];
+    for (let g = cIndex(track, kA); g <= cIndex(track, kB); g++) { const k = closeGrid(track, g); vals.push(k[4].x - k[2].x); }
+    const sT = (median(vals) >= 0 ? 1 : -1) * (opt.flip ? -1 : 1);
+    track.sT = sT;
+    const cpp = (opt.heightCm || 165) * 0.05 / track.S;
+    const ang = (a, b) => Math.atan2(-(b.y - a.y), (b.x - a.x) * sT) * DEG;
+    const K = (g) => closeGrid(track, g);
+    const thumbA = (g) => { const k = K(g); return ang(k[2], k[4]); };
+    const backA = (g) => { const k = K(g); return ang(k[0], k[9]); };
+    const knA = (g) => { const k = K(g); return Math.atan2((k[17].x - k[5].x) * sT, k[17].y - k[5].y) * DEG; };
+    const ud = (v) => (v >= 0 ? '上' : '下');
+    const tk = (kA + kB) / 2, ta = (W.post[0] + W.post[1]) / 2;
+    const thumb = cmed(track, kA, kB, thumbA);
+    add({ key: 'y_thumb', group: 'y_kai', label: '角見（親指）の向き', value: thumb, display: `的の方向から${ud(thumb)}へ ${Math.abs(thumb).toFixed(1)}°`,
+      verdict: Math.abs(thumb) <= 10 ? '的の方向' : (thumb > 0 ? '上を向く' : '下を向く'), status: Math.abs(thumb) <= 10 ? 'ok' : 'warn', note: '親指の付け根から先への線。目安は的の方向へまっすぐ', t: tk });
+    const back = cmed(track, kA, kB, backA);
+    add({ key: 'y_back', group: 'y_kai', label: '手首の折れ（手の甲）', value: back, display: `${ud(back)}へ ${Math.abs(back).toFixed(1)}°`,
+      verdict: Math.abs(back) <= 12 ? 'まっすぐ' : (back > 0 ? '上を向く' : '下を向く'), status: Math.abs(back) <= 12 ? 'ok' : 'warn', note: '手首から中指の付け根への線。腕がほぼ水平な時の手首の折れの目安', t: tk });
+    const open = cmed(track, kA, kB, (g) => { const k = K(g); const a = Math.atan2(k[4].y - k[2].y, k[4].x - k[2].x), b = Math.atan2(k[8].y - k[5].y, k[8].x - k[5].x); return Math.abs(wrapDeg((a - b) * DEG)); });
+    add({ key: 'y_open', group: 'y_kai', label: '虎口の開き', value: open, display: Number.isFinite(open) ? `親指と人差し指 ${Math.round(open)}°` : '—', verdict: '', status: 'info', note: '人差し指の向きは流派で違うので参考', t: tk });
+    const curl = cmed(track, kA, kB, (g) => { const k = K(g); return (angleAt(k[9], k[10], k[11]) + angleAt(k[13], k[14], k[15]) + angleAt(k[17], k[18], k[19])) / 3; });
+    add({ key: 'y_curl', group: 'y_kai', label: '中指・薬指・小指の締め', value: curl, display: Number.isFinite(curl) ? `第二関節 平均 ${Math.round(curl)}°` : '—', verdict: '', status: 'info', note: '180°でまっすぐ。弓の陰の指は推定なので参考', t: tk });
+    const tilt = cmed(track, kA, kB, knA);
+    add({ key: 'y_tilt', group: 'y_kai', label: '指の付け根の線', value: tilt, display: `${tilt >= 0 ? '小指側が的の方へ' : '小指側が手前へ'} ${Math.abs(tilt).toFixed(1)}°`, verdict: '', status: 'info', note: '人差し指と小指の付け根を結ぶ線の、鉛直からの傾き', t: tk });
+    const jit = csd(track, kA, kB, thumbA);
+    add({ key: 'y_jit', group: 'y_kai', label: '会の間の角見のぶれ', value: jit, display: `標準偏差 ${jit.toFixed(1)}°`, verdict: jit <= 2.5 ? '安定' : 'ぶれあり', status: jit <= 2.5 ? 'ok' : 'warn', note: '会の間に親指の向きがどれだけ揺れたか', t: tk });
+    // 離れの直前
+    if (fineEnough(track, 1 / 50)) {
+      const pre = cmed(track, ph.tHanare - 0.3, ph.tHanare - 0.15, thumbA) , just = cmed(track, ph.tHanare - 0.05, ph.tHanare - 0.01, thumbA);
+      const d = just - pre;
+      add({ key: 'y_prerel', group: 'y_hanare', label: '離れの直前の動き', value: d, display: Number.isFinite(d) ? `親指が${ud(d)}へ ${Math.abs(d).toFixed(1)}°（離れの 0.3〜0.01 秒前）` : '—',
+        verdict: Math.abs(d) <= 3 ? '動いていない' : '離れの前に動き始めている', status: Math.abs(d) <= 3 ? 'ok' : 'warn', note: '離れの前に手の内が崩れ始めていないか', t: ph.tHanare - 0.1 });
+    }
+    if (W.post[1] > W.post[0]) {
+      const dT = cmed(track, W.post[0], W.post[1], thumbA) - cmed(track, W.pre[0], W.pre[1], thumbA);
+      add({ key: 'y_dthumb', group: 'y_hanare', label: '角見の変化', value: dT, display: `${ud(dT)}へ ${Math.abs(dT).toFixed(1)}°`,
+        verdict: Math.abs(dT) <= 10 ? '保たれている' : (dT < 0 ? '下へ振れる' : '上へ振れる'), status: Math.abs(dT) <= 10 ? 'ok' : 'warn', note: '離れの直前と 0.15〜0.25 秒後の親指の向きの差', t: ta });
+      const dB = cmed(track, W.post[0], W.post[1], backA) - cmed(track, W.pre[0], W.pre[1], backA);
+      add({ key: 'y_dback', group: 'y_hanare', label: '手首の変化', value: dB, display: `${ud(dB)}へ ${Math.abs(dB).toFixed(1)}°`,
+        verdict: Math.abs(dB) <= 12 ? '保たれている' : (dB < 0 ? '手首が下がる' : '手首が上がる'), status: Math.abs(dB) <= 12 ? 'ok' : 'warn', note: '離れで手首の角度が崩れたか', t: ta });
+      const dK = wrapDeg(cmed(track, W.post[0], W.post[1], knA) - cmed(track, W.pre[0], W.pre[1], knA));
+      add({ key: 'y_turn', group: 'y_hanare', label: '手の内の回り', value: dK, display: `${dK >= 0 ? '小指側が的の方へ' : '小指側が手前へ'} ${Math.abs(dK).toFixed(1)}°`,
+        verdict: Math.abs(dK) <= 15 ? '小さい' : '大きく回る', status: Math.abs(dK) <= 15 ? 'ok' : 'warn', note: '指の付け根の線が離れでどれだけ回ったか', t: ta });
+      if (fineEnough(track, 1 / 90)) {
+        const ori = track.sig.ori, dt = track.dt, hw = Math.max(1, Math.round(0.01 / dt));
+        const angv = (g) => { const a = Math.max(0, g - hw), b = Math.min(track.grid.G - 1, g + hw); return Math.abs(ori[b] - ori[a]) / ((b - a) * dt || 1); };
+        const mx = cmax(track, ph.tHanare - 0.02, Math.min(ph.tEnd, ph.tHanare + 0.3), angv);
+        let tStop = NaN;
+        for (let g = cIndex(track, mx.t); g < track.grid.G; g++) if (angv(g) < mx.v * 0.1) { tStop = track.grid.gt[g]; break; }
+        add({ key: 'y_vmax', group: 'y_hanare', label: '回りの最大の速さ', value: mx.v, display: `${Math.round(mx.v).toLocaleString()}°/秒`, verdict: '', status: 'info', note: '離れで手の内が一番速く回った時の速さ', t: mx.t });
+        if (Number.isFinite(tStop)) add({ key: 'y_settle', group: 'y_hanare', label: '回りが収まるまで', value: tStop - ph.tHanare, display: `${ms(tStop - ph.tHanare)} ミリ秒`, verdict: '', status: 'info', note: '離れから、回りの速さが最大の 1 割に落ちるまで', t: tStop });
+      } else {
+        add({ key: 'y_vmax', group: 'y_hanare', label: '回りの最大の速さ', value: NaN, display: '—', verdict: '', status: 'info', note: 'スロー撮影（実時間で毎秒 120 コマ以上）で測れます', t: ph.tHanare });
+      }
+      const c = (k) => ({ x: (k[0].x + k[5].x + k[9].x + k[13].x + k[17].x) / 5, y: (k[0].y + k[5].y + k[9].y + k[13].y + k[17].y) / 5 });
+      const c0 = c(K(cIndex(track, ph.tHanare - 0.03))), c1 = c(K(cIndex(track, Math.min(ph.tEnd, ph.tHanare + 0.4))));
+      const dx = (c1.x - c0.x) * sT * cpp, dy = -(c1.y - c0.y) * cpp, dist = Math.hypot(dx, dy);
+      add({ key: 'y_move', group: 'y_hanare', label: '弓手の振れ', value: dist, display: `${ud(dy)} ${Math.abs(dy).toFixed(0)} cm ／ ${dx >= 0 ? '的側' : '手前'} ${Math.abs(dx).toFixed(0)} cm`,
+        verdict: dist <= 3 ? '小さい' : (Math.abs(dy) >= Math.abs(dx) ? (dy < 0 ? '下へ' : '上へ') : (dx > 0 ? '的側へ' : '手前へ')), status: dist <= 6 ? (dist <= 3 ? 'ok' : 'info') : 'warn', note: '離れの前後 0.4 秒での手のひらの中心の移動（身長から換算）', t: ph.tHanare + 0.2 });
+    }
+    return M;
+  }
+
+  // 馬手（目印）。角度は後ろから見た画面で、反時計回りを＋（右手を後ろから見ると、内へ捻る向き）
+  function meteMetrics(track, ph, opt = {}) {
+    const M = [];
+    if (!track || !ph) return M;
+    const add = (o) => { o.side = 'mete'; M.push(o); };
+    const W = windows(ph), { kA, kB } = W, sig = track.sig;
+    const cpp = (opt.spacingCm || 5) / track.S;
+    const th = (g) => sig.ori[g];
+    const io = (v) => (v >= 0 ? '内へ' : '外へ');
+    const tk = (kA + kB) / 2;
+    const theta = cmed(track, kA, kB, th);
+    const thN = wrapDeg(theta);
+    add({ key: 'm_twist', group: 'm_kai', label: '会の捻りの角度', value: thN, display: `甲の線：小指側が${thN >= 0 ? '上' : '下'}へ ${Math.abs(thN).toFixed(1)}°`, verdict: '', status: 'info', note: '黄（人差し指側）から青（小指側）への線の、水平からの傾き。カメラを水平に置いた時の値', t: tk });
+    const d = cmed(track, W.late[0], W.late[1], th) - cmed(track, W.early[0], W.early[1], th);
+    add({ key: 'm_drift', group: 'm_kai', label: '会の間の捻りの変化', value: d, display: `${io(d)} ${Math.abs(d).toFixed(1)}°`,
+      verdict: Math.abs(d) <= 3 ? '保たれている' : (d < 0 ? '捻りが戻る（緩み）' : '捻りが強まる'), status: Math.abs(d) <= 3 ? 'ok' : (d < 0 ? 'warn' : 'info'), note: '会の始めと終わりの差。外へ＝捻りが戻る向き', t: tk });
+    const jit = csd(track, kA, kB, th);
+    add({ key: 'm_jit', group: 'm_kai', label: '会の間のぶれ', value: jit, display: `標準偏差 ${jit.toFixed(1)}°`, verdict: jit <= 2 ? '安定' : 'ぶれあり', status: jit <= 2 ? 'ok' : 'warn', note: '会の間に甲の向きがどれだけ揺れたか', t: tk });
+    const V = track.grid.V;
+    const wrist = (g) => { const mx = (V[0][g] + V[2][g]) / 2, my = (V[1][g] + V[3][g]) / 2; return Math.atan2(mx - V[4][g], -(my - V[5][g])) * DEG; };
+    const wr = cmed(track, kA, kB, wrist), dwr = cmed(track, W.late[0], W.late[1], wrist) - cmed(track, W.early[0], W.early[1], wrist);
+    add({ key: 'm_wrist', group: 'm_kai', label: '手首から甲への線', value: wr, display: `${wr >= 0 ? '外' : '内'}へ ${Math.abs(wr).toFixed(1)}°（会の間に ${dwr >= 0 ? '外' : '内'}へ ${Math.abs(dwr).toFixed(1)}°）`, verdict: '', status: 'info', note: '緑（手首）から甲の中心への線の、鉛直からの傾き。手首の折れの目安', t: tk });
+    if (W.post[1] > W.post[0]) {
+      const turn = cmed(track, W.post[0], W.post[1], th) - cmed(track, W.pre[0], W.pre[1], th);
+      add({ key: 'm_turn', group: 'm_hanare', label: '離れでの回り', value: turn, display: `${io(turn)} ${Math.abs(turn).toFixed(1)}°`, verdict: turn < 0 ? '捻りが戻る向き' : 'さらに捻る向き', status: 'info', note: '離れの直前と 0.15〜0.25 秒後の、甲の向きの差', t: ph.tHanare + 0.1 });
+      const hw = Math.max(1, Math.round(0.01 / track.dt));
+      const angv = (g) => { const a = Math.max(0, g - hw), b = Math.min(track.grid.G - 1, g + hw); return Math.abs(sig.ori[b] - sig.ori[a]) / ((b - a) * track.dt || 1); };
+      if (fineEnough(track, 1 / 90)) {
+        const mx = cmax(track, ph.tHanare - 0.02, Math.min(ph.tEnd, ph.tHanare + 0.3), angv);
+        add({ key: 'm_vmax', group: 'm_hanare', label: '回りの最大の速さ', value: mx.v, display: `${Math.round(mx.v).toLocaleString()}°/秒（離れから ${ms(mx.t - ph.tHanare)} ミリ秒）`, verdict: '', status: 'info', note: '離れで甲が一番速く回った時の速さ', t: mx.t });
+      } else add({ key: 'm_vmax', group: 'm_hanare', label: '回りの最大の速さ', value: NaN, display: '—', verdict: '', status: 'info', note: 'スロー撮影（実時間で毎秒 120 コマ以上）で測れます', t: ph.tHanare });
+      const g0 = cIndex(track, ph.tHanare - 0.02), g1 = cIndex(track, Math.min(ph.tEnd, ph.tHanare + 0.2));
+      const dx = (V[4][g1] - V[4][g0]) * cpp, dy = -(V[5][g1] - V[5][g0]) * cpp, dist = Math.hypot(dx, dy);
+      add({ key: 'm_path', group: 'm_hanare', label: '手の抜ける方向', value: Math.atan2(dy, dx) * DEG, display: `${dx >= 0 ? '外' : '内'}へ ${Math.abs(dx).toFixed(0)} cm ／ ${dy >= 0 ? '上' : '下'}へ ${Math.abs(dy).toFixed(0)} cm`,
+        verdict: dist < 2 ? 'ほとんど動かない' : (Math.abs(dy) > Math.abs(dx) * 1.2 ? (dy < 0 ? '下へ抜ける' : '上へ抜ける') : '外へ抜ける'), status: 'info', note: '離れから 0.2 秒の手首（緑）の移動。目印の間隔から cm に換算', t: ph.tHanare + 0.1 });
+      if (fineEnough(track, 1 / 50)) {
+        const spd = (g) => sig.sp[g];
+        const mx = cmax(track, ph.tHanare - 0.02, Math.min(ph.tEnd, ph.tHanare + 0.4), spd);
+        let tStop = NaN;
+        for (let g = cIndex(track, mx.t); g < track.grid.G; g++) if (spd(g) < mx.v * 0.15) { tStop = track.grid.gt[g]; break; }
+        if (Number.isFinite(tStop)) add({ key: 'm_settle', group: 'm_hanare', label: '手が止まるまで', value: tStop - ph.tHanare, display: `${ms(tStop - ph.tHanare)} ミリ秒`, verdict: '', status: 'info', note: '離れから、手の速さが最大の 15% に落ちるまで', t: tStop });
+      }
+    }
+    return M;
+  }
+
+  // ---- 合成サンプル ----
+  function sampleTimes(dur, tH, fine) {
+    const times = [];
+    for (let t = 0.03; t < dur; t += 1 / 15) if (Math.abs(t - tH) > 0.45) times.push(t);
+    for (let t = tH - 0.45; t <= tH + 0.55; t += fine) times.push(t);
+    return times;
+  }
+  // 弓手（正面寄りから。的は画面の右）。離れで手が少し下がって回り、親指がやや下へ
+  function makeYundeSample(noise = 1, seed = 5) {
+    const rnd = mulberry(seed);
+    const gauss = () => { let u = 0; while (!u) u = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rnd()); };
+    const ease = (u) => u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
+    let P0 = [[300, 520], [352, 498], [405, 470], [455, 462], [500, 462], [440, 500], [488, 520], [514, 545], [524, 570], [440, 540], [476, 574], [472, 604], [452, 616], [430, 575], [460, 604], [452, 630], [432, 636], [415, 605], [441, 628], [434, 650], [417, 656]];
+    const rot = (p, o, a) => { const c = Math.cos(a), s = Math.sin(a); return [o[0] + (p[0] - o[0]) * c - (p[1] - o[1]) * s, o[1] + (p[0] - o[0]) * s + (p[1] - o[1]) * c]; };
+    let P1 = P0.map((p, j) => {
+      let q = rot(p, P0[0], 7 / DEG);
+      if (j >= 2 && j <= 4) q = rot(q, rot(P0[2], P0[0], 7 / DEG), 6 / DEG);
+      if (j >= 6 && j <= 8) q = rot(q, rot(P0[5], P0[0], 7 / DEG), -12 / DEG);
+      return [q[0] + 16, q[1] + 26];
+    });
+    const Z = 1.8, map = (q) => [360 + (q[0] - 420) * Z, 470 + (q[1] - 550) * Z];
+    P0 = P0.map(map); P1 = P1.map(map);
+    const stage = { bowX0: map([412, 0])[0], bowX1: map([446, 0])[0], gripY0: map([0, 470])[1], gripY1: map([0, 670])[1], arrowY: map([0, 446])[1], arrowH: 4 * Z };
+    const tH = 3.6, dur = 6.2;
+    const frames = sampleTimes(dur, tH, 1 / 240).map(t => {
+      const u = ease((t - tH) / 0.09), over = t > tH ? Math.sin(clamp((t - tH) / 0.35, 0, 1) * Math.PI) * 0.08 : 0;
+      const drift = (t < tH ? 3 * clamp(t / tH, 0, 1) : 3) * Z;
+      const k = [];
+      for (let j = 0; j < 21; j++) {
+        const x = P0[j][0] + (P1[j][0] - P0[j][0]) * (u + over) + drift, y = P0[j][1] + (P1[j][1] - P0[j][1]) * (u + over);
+        k.push(x + gauss() * 1.4 * noise, y + gauss() * 1.4 * noise, 0);
+      }
+      return { t, k, p: 0.94 };
+    });
+    return { kind: 'yunde', w: 720, h: 960, duration: dur, fps: 240, slow: 1, frames, sample: true, tH, stage };
+  }
+  // 馬手（後ろから。画面の右が外側）。会でわずかに捻りが戻り、離れで外へ 46° 回って外・下へ抜ける
+  function meteGeom(t) {
+    const ease = (u) => u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u);
+    const tH = 4.0;
+    const draw = ease(t / 1.4); // 引分けで頬へ
+    let th = 36 - 8 * draw - 2 * clamp((t - 1.5) / 2.5, 0, 1);
+    let cx = 300 + 60 * draw, cy = 560 - 90 * draw;
+    if (t > tH) {
+      const u = ease((t - tH) / 0.075), m = ease((t - tH) / 0.22);
+      th -= 46 * u; cx += 150 * m; cy += 55 * m;
+    }
+    return { th, cx, cy, tH };
+  }
+  function meteMarkers(t) {
+    const { th, cx, cy } = meteGeom(t);
+    const a = th / DEG, ux = Math.cos(a), uy = -Math.sin(a), half = 55; // 黄と青の間隔 110px ≒ 5cm
+    const b = (th - 28) * 0.35 / DEG; // 手首は甲ほど回らない
+    return [[cx - ux * half, cy - uy * half], [cx + ux * half, cy + uy * half], [cx + Math.sin(b) * 118, cy + Math.cos(b) * 118]];
+  }
+  function makeMeteSample(noise = 1, seed = 9) {
+    const rnd = mulberry(seed);
+    const gauss = () => { let u = 0; while (!u) u = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rnd()); };
+    const tH = 4.0, dur = 6.0;
+    const frames = sampleTimes(dur, tH, 1 / 240).map(t => {
+      const mk = meteMarkers(t), m = [];
+      for (const [x, y] of mk) m.push(x + gauss() * 0.8 * noise, y + gauss() * 0.8 * noise, 1);
+      return { t, m };
+    });
+    return { kind: 'mete', w: 720, h: 960, duration: dur, fps: 240, slow: 1, frames, sample: true, tH };
+  }
+
+  return { KP, NK, EDGES, PHASES, KASUMI, DT, prepareTrack, kpAt, kpAtGrid, gIndex, detectPhases, syncOffset, evenPhases, phaseAt, computeMetrics, fuseSetup, pose3dAt, targetStats, zoneOf, dirWords, makeSample, median, clamp, tilt, HAND_EDGES, TPH, prepareClose, closeAt, closeGrid, cIndex, detectClosePhases, closePhaseAt, yundeMetrics, meteMetrics, makeYundeSample, makeMeteSample, meteMarkers, meteGeom };
 })();
 if (typeof module !== 'undefined') module.exports = Kyu;

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="description" content="弓道の射形を、正面と馬手側の動画と矢所の写真から測る部内用のアプリ">
+<meta name="description" content="弓道の射形を、正面と馬手側の動画と矢所の写真から測り、手の内と馬手のひねりを接写から測る部内用のアプリ">
 <meta name="robots" content="noindex">
 <title>射形分析帳</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -167,6 +167,11 @@ button.chip { border: 0; cursor: pointer; }
 #topCanvas:active { cursor: grabbing; }
 .pane .cam { margin-top: 2px; max-width: 100%; overflow-x: auto; }
 .pane .cam button { padding: 6px 10px; white-space: nowrap; }
+.vidrow { display: flex; gap: 6px 16px; align-items: center; justify-content: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+.vidrow label { display: inline-flex; align-items: center; gap: 6px; }
+.vidrow input { accent-color: var(--main); }
+.vidrow input[type="range"] { width: 140px; }
+.vidrow input:disabled + span, .vidrow input:disabled { opacity: .45; }
 .zoom { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .zoom button { width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255,255,255,.28); background: rgba(12,14,17,.72); color: #f1f3f5; font-size: 18px; line-height: 1; padding: 0; }
 .stage.wide3d { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); align-items: start; }
@@ -285,6 +290,48 @@ button.chip { border: 0; cursor: pointer; }
   .hud-phase { font-size: 18px; }
   .tbtn { width: 38px; height: 38px; }
 }
+
+/* モード（射形 ⇄ 手の内・ひねり） */
+body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
+.modes { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: var(--sunk); border-radius: 12px; padding: 4px; }
+.modes button { border: 0; background: transparent; border-radius: 9px; padding: 9px 12px; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; text-align: left; color: var(--muted); min-width: 0; }
+.modes button b { font-family: var(--font-display); font-size: 17px; font-weight: 800; color: var(--ink); line-height: 1.3; }
+.modes button span { font-size: 12px; line-height: 1.4; }
+.modes button[aria-pressed="true"] { background: var(--main); color: var(--on-main); box-shadow: inset 0 -3px 0 var(--sub); }
+.modes button[aria-pressed="true"] b { color: var(--on-main); }
+.modes button:disabled { opacity: .5; cursor: not-allowed; }
+/* 接写の枠 */
+.te-slots { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.te-slot { gap: 8px; }
+.slot-pick { position: relative; display: flex; flex-direction: column; align-items: flex-start; gap: 6px; width: 100%; min-width: 0; cursor: pointer; }
+.slot-opt { display: flex; flex-direction: column; gap: 3px; width: 100%; font-size: 11.5px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; }
+.slot-opt label { display: flex; flex-direction: column; gap: 2px; }
+.slot-opt select { border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 5px 6px; font-size: 13px; width: 100%; min-width: 0; color: var(--ink); }
+.slot-opt .fps { font-size: 11px; min-height: 1.4em; }
+.mk-row { display: inline-flex; gap: 3px; }
+.mk-dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%; vertical-align: -1px; margin-right: 3px; box-shadow: 0 0 0 1px rgba(0,0,0,.25); }
+.te-ctl { width: 100%; display: flex; flex-direction: column; gap: 8px; align-items: flex-start; padding: 10px 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+.te-ctl .scrub { display: flex; gap: 8px; align-items: center; width: 100%; color: var(--muted); font-size: 12px; }
+.te-ctl .scrub input { flex: 1; min-width: 0; accent-color: var(--main); }
+.msg-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.ctl-warn { color: var(--warn); font-size: 12px; line-height: 1.5; }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.tog[data-tl="skel"][aria-pressed="true"] i { background: linear-gradient(90deg, var(--yunde-ln) 50%, var(--mete-ln) 50%); }
+.tog[data-tl="guide"][aria-pressed="true"] i { background: var(--guide); }
+.tog[data-tl="trail"][aria-pressed="true"] i { background: var(--ya); }
+#teTimeline { width: 100%; height: 50px; display: block; touch-action: none; cursor: pointer; border-radius: 8px; }
+.te-zoom { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+.te-zoom input { accent-color: var(--main); }
+#teChart { width: 100%; height: 230px; display: block; touch-action: pan-y; cursor: pointer; }
+.te-adj .adj-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.te-adj .adj-row .lbl { flex: 1 1 7em; }
+#teCopyFallback { width: 100%; min-height: 160px; font-family: var(--font-num); font-size: 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); padding: 8px; }
+.mk-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12.5px; }
+@media (max-width: 420px) {
+  .modes button { padding: 8px 9px; }
+  .modes button b { font-size: 15.5px; }
+  .modes button span { font-size: 11px; }
+}
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 /* 合言葉と AI 講評（ウェブ版） */
 .login { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
@@ -323,9 +370,13 @@ button.chip { border: 0; cursor: pointer; }
     <p class="lede">正面と馬手側の動画、矢所の写真から、骨格と矢を重ねて八節ごとに射形を測ります。解析はそれぞれの端末の中で行い、記録は部の合言葉を知っている人と共有します。</p>
   </header>
 
+  <nav class="modes" id="modeSeg" aria-label="モード">
+    <button type="button" data-mode="shakei" aria-pressed="true"><b>射形</b><span>全身・2方向と矢所</span></button>
+    <button type="button" data-mode="te" aria-pressed="false"><b>手の内・ひねり</b><span>弓手と馬手の接写</span></button>
+  </nav>
 
   <section aria-labelledby="h-src">
-    <div class="sec-h"><h2 id="h-src">素材</h2><span class="sub">3つまで選べます</span></div>
+    <div class="sec-h"><h2 id="h-src">素材</h2><span class="sub m-sk">3つまで選べます</span><span class="sub m-te">弓手と馬手を別々に撮ります</span></div>
     <div class="shotbar" id="shotbar" hidden>
       <div id="loginBox">
         <form class="login" id="loginForm" autocomplete="on">
@@ -337,19 +388,19 @@ button.chip { border: 0; cursor: pointer; }
       <div id="shotMain" class="shot-main" hidden>
       <div class="shot-head"><span id="whoami"></span><button type="button" class="linkish" id="logout">合言葉を入れ直す</button></div>
       <div class="shot-row">
-        <label class="shot-sel"><span>射の記録</span><select id="shotSel" aria-label="射の記録を選ぶ"></select></label>
+        <label class="shot-sel"><span id="shotLbl">射の記録</span><select id="shotSel" aria-label="射の記録を選ぶ"></select></label>
         <button type="button" class="btn small" id="newShot">＋ 新しい射</button>
       </div>
       <input type="text" id="shotMemo" maxlength="60" placeholder="メモ（射手の名前・何本目など）" aria-label="この射のメモ" hidden>
       <div class="shot-newer" id="shotNewer" hidden><span id="shotNewerText"></span><button type="button" class="btn small ghost" id="shotGo">その射へ移る</button></div>
       <div class="shot-del">
         <button type="button" class="linkish" id="delShot" hidden>この射の記録を消す</button>
-        <span id="delConfirm" hidden>動画の結果・写真・印がすべて消えます。<button type="button" class="linkish danger" id="delYes">消す</button><button type="button" class="linkish" id="delNo">やめる</button></span>
+        <span id="delConfirm" hidden><span id="delWhat">動画の結果・写真・印がすべて消えます。</span><button type="button" class="linkish danger" id="delYes">消す</button><button type="button" class="linkish" id="delNo">やめる</button></span>
       </div>
       </div>
       <p class="shot-note" id="shotNote" aria-live="polite"></p>
     </div>
-    <div class="slots">
+    <div class="slots m-sk">
       <label class="slot" id="slot-front">
         <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="18" cy="7" r="3.4"/><path d="M18 11v11M12 13h12M12 13l-5 3M24 13l6 0M14 22l-2 10M22 22l2 10"/><path d="M30 6v20" style="stroke:var(--ya)"/></svg>
         <span class="s-name">正面の動画</span>
@@ -372,7 +423,35 @@ button.chip { border: 0; cursor: pointer; }
         <input type="file" accept="image/*" id="in-photo" aria-label="矢所の写真を選ぶ">
       </label>
     </div>
-    <details class="tips">
+    <div class="slots te-slots m-te">
+      <div class="slot te-slot" id="slot-yunde">
+        <label class="slot-pick">
+          <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3v30" style="stroke:var(--ya)"/><path d="M6 21c0-4 2-7 6-7h9c2 0 3 1 3 2.5S23 19 21 19h-3"/><path d="M12 14l-1-4M16 14v-4.5M20 14.2V10"/><path d="M6 21l-3 5"/><path d="M21 17l8-1.5" style="stroke:var(--ya)"/></svg>
+          <span class="s-name">弓手の接写</span>
+          <span class="chip" data-st>未選択</span>
+          <span class="s-file" data-file>正面寄りから弓手を大きく</span>
+          <input type="file" accept="video/*" id="in-yunde" aria-label="弓手の接写動画を選ぶ">
+        </label>
+        <div class="slot-opt">
+          <label><span>時間の流れ</span><select id="slow-yunde" aria-label="弓手の動画の時間の流れ"><option value="1">実時間（普通の撮影）</option><option value="4">スロー ¼（毎秒120コマで撮影）</option><option value="8">スロー ⅛（毎秒240コマで撮影）</option></select></label>
+          <span class="fps num" id="fps-yunde"></span>
+        </div>
+      </div>
+      <div class="slot te-slot" id="slot-mete">
+        <label class="slot-pick">
+          <svg viewBox="0 0 36 36" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 30l4-10c1-3 3-5 6-5h6c3 0 5 2 5 5v1c0 3-2 5-5 5H15"/><path d="M12 20l-3-7"/><circle cx="18.5" cy="19" r="2.2" style="fill:#f5c542;stroke:none"/><circle cx="25.5" cy="19.5" r="2.2" style="fill:#3d8bff;stroke:none"/><circle cx="11.5" cy="26.5" r="2.2" style="fill:#62c43a;stroke:none"/></svg>
+          <span class="s-name">馬手の接写</span>
+          <span class="chip" data-st>未選択</span>
+          <span class="s-file" data-file>後ろから馬手を大きく（目印3つ）</span>
+          <input type="file" accept="video/*" id="in-mete" aria-label="馬手の接写動画を選ぶ">
+        </label>
+        <div class="slot-opt">
+          <label><span>時間の流れ</span><select id="slow-mete" aria-label="馬手の動画の時間の流れ"><option value="1">実時間（普通の撮影）</option><option value="4">スロー ¼（毎秒120コマで撮影）</option><option value="8">スロー ⅛（毎秒240コマで撮影）</option></select></label>
+          <span class="fps num" id="fps-mete"></span>
+        </div>
+      </div>
+    </div>
+    <details class="tips m-sk">
       <summary>撮り方のこつ</summary>
       <ul>
         <li>三脚などで固定し、足踏みから残心まで全身が入るように撮ります。</li>
@@ -383,11 +462,23 @@ button.chip { border: 0; cursor: pointer; }
         <li>何人かで撮る時は、1人が「＋ 新しい射」を押し、ほかの人は同じページを開いて合言葉を入れ、それぞれの枠に登録します。</li>
       </ul>
     </details>
+    <details class="tips m-te">
+      <summary>撮り方と目印の付け方</summary>
+      <ul>
+        <li><b>カメラは矢の通り道や的の側に決して置かないでください。</b>弓返りや残心で腕が伸びても当たらないよう、手から 1.5m 以上離し、ズームで大きく写します。</li>
+        <li>三脚で水平に置きます。傾くと、捻りの角度がその分ずれます。</li>
+        <li>弓手: 射手の正面（胸の側）、拳の高さから。拳と握りが画面の半分くらいの大きさで、会から残心まで画面から出ないように撮ります。</li>
+        <li>馬手: 射手の後ろ（背中の側）、馬手の高さから。ゆがけの甲がよく見えるように撮ります。</li>
+        <li>目印: 直径 1.5〜2cm の丸いシールを、ゆがけの甲の<span class="mk-dot" style="background:#f5c542"></span>人差し指側に黄、<span class="mk-dot" style="background:#3d8bff"></span>小指側に青、<span class="mk-dot" style="background:#62c43a"></span>手首に緑で貼ります。黄と青の間は約 5cm（下の設定で変えられます）。光らない紙のシールが追いやすいです。ゆがけが黄色っぽい時は、黄の代わりにピンクなど、ほかと違う色にします（タップした色を覚えて追います）。</li>
+        <li>スロー撮影が使えると、離れの瞬間の速さまで測れます。毎秒240コマで撮って毎秒30コマで再生される動画は「スロー ⅛」、毎秒120コマなら「スロー ¼」。枠に「毎秒 240 コマ」と出る動画はすでに実時間なので「実時間」のままにします。</li>
+        <li>iPhone のスローは、始めと終わりが普通の速さになります。写真アプリの「編集」でスローの範囲を動画全体に広げてから選んでください。</li>
+      </ul>
+    </details>
   </section>
 
-  <div class="banner" id="sampleBanner"><b>サンプル表示中</b><span>合成データの射です。動画を選ぶと、あなたの射に切り替わります。</span></div>
+  <div class="banner" id="sampleBanner"><b>サンプル表示中</b><span id="sampleText">合成データの射です。動画を選ぶと、あなたの射に切り替わります。</span></div>
 
-  <section id="viewer" aria-labelledby="h-view">
+  <section id="viewer" class="m-sk" aria-labelledby="h-view">
     <div class="sec-h"><h2 id="h-view">射</h2><span class="sub" id="viewSub">2方向を合成した立体と、動画に重ねた骨格・矢・三重十文字</span></div>
     <div class="viewbar">
       <div class="seg" role="group" aria-label="表示する動画">
@@ -439,6 +530,10 @@ button.chip { border: 0; cursor: pointer; }
           <button type="button" data-cam="side" aria-pressed="false">馬手側</button>
           <button type="button" data-cam="target" aria-pressed="false">的側</button>
         </div>
+        <div class="vidrow">
+          <label class="vid-on"><input type="checkbox" id="vidOn" checked> 動画を重ねる</label>
+          <label class="vid-alpha"><span>濃さ</span><input type="range" id="vidAlpha" min="10" max="100" step="5" value="55" aria-label="重ねる動画の濃さ"></label>
+        </div>
       </figure>
     </div>
 
@@ -466,7 +561,7 @@ button.chip { border: 0; cursor: pointer; }
     </details>
   </section>
 
-  <section aria-labelledby="h-met">
+  <section class="m-sk" aria-labelledby="h-met">
     <div class="sec-h"><h2 id="h-met">計測</h2><span class="sub">行を押すとその場面へ移動</span></div>
     <div id="metricsArea"></div>
     <div class="copy-row">
@@ -482,7 +577,7 @@ button.chip { border: 0; cursor: pointer; }
     </div>
   </section>
 
-  <section aria-labelledby="h-chart">
+  <section class="m-sk" aria-labelledby="h-chart">
     <div class="sec-h"><h2 id="h-chart">推移</h2><span class="sub" id="chartSub">正面の動画から</span></div>
     <div class="chart-box">
       <div class="legend"><span><i style="background:var(--yunde-ln)"></i>弓手の高さ</span><span><i style="background:var(--mete-ln)"></i>馬手の高さ</span><span><i style="background:var(--ya)"></i>両拳の間隔</span></div>
@@ -490,7 +585,7 @@ button.chip { border: 0; cursor: pointer; }
     </div>
   </section>
 
-  <section aria-labelledby="h-tgt">
+  <section class="m-sk" aria-labelledby="h-tgt">
     <div class="sec-h"><h2 id="h-tgt">矢所</h2><span class="sub">尺二の霞的（直径36cm）として計算</span></div>
     <div class="target-grid">
       <div class="photo-box">
@@ -518,14 +613,100 @@ button.chip { border: 0; cursor: pointer; }
     </div>
   </section>
 
+  <section id="teSec" class="m-te" aria-labelledby="h-te">
+    <div class="sec-h"><h2 id="h-te">手の内・ひねり</h2><span class="sub">弓手と馬手を、それぞれの離れの瞬間でそろえて表示</span></div>
+    <div class="viewbar">
+      <div class="seg" id="teView" role="group" aria-label="表示する動画">
+        <button type="button" data-tv="both" aria-pressed="true">並べる</button>
+        <button type="button" data-tv="yunde" aria-pressed="false">弓手</button>
+        <button type="button" data-tv="mete" aria-pressed="false">馬手</button>
+      </div>
+      <div class="layers" id="teLayers" role="group" aria-label="重ねる線">
+        <button type="button" class="tog" data-tl="skel"><i></i>手と目印</button>
+        <button type="button" class="tog" data-tl="guide"><i></i>角度の目安</button>
+        <button type="button" class="tog" data-tl="trail"><i></i>離れの軌跡</button>
+      </div>
+    </div>
+    <div class="stage" id="teStage">
+      <figure class="pane" id="pane-yunde">
+        <figcaption class="pane-cap"><span class="vtag">弓手</span><span>正面寄りから</span></figcaption>
+        <div class="frame">
+          <video playsinline muted preload="auto"></video>
+          <canvas class="ov" aria-label="弓手の接写。手の21点と角見の線"></canvas>
+          <div class="hud"><span class="hud-phase"></span><span class="hud-val"></span></div>
+          <div class="pane-msg" hidden></div>
+          <div class="pane-prog" hidden><div class="bar"><i></i></div><span class="ptxt"></span><button type="button" class="cancel">中止</button></div>
+        </div>
+        <div class="te-ctl" hidden></div>
+      </figure>
+      <figure class="pane" id="pane-mete">
+        <figcaption class="pane-cap"><span class="vtag">馬手</span><span>後ろから</span></figcaption>
+        <div class="frame">
+          <video playsinline muted preload="auto"></video>
+          <canvas class="ov" aria-label="馬手の接写。ゆがけの目印と捻りの線"></canvas>
+          <div class="hud"><span class="hud-phase"></span><span class="hud-val"></span></div>
+          <div class="pane-msg" hidden></div>
+          <div class="pane-prog" hidden><div class="bar"><i></i></div><span class="ptxt"></span><button type="button" class="cancel">中止</button></div>
+        </div>
+        <div class="te-ctl" hidden></div>
+      </figure>
+    </div>
+    <div class="transport">
+      <button type="button" class="tbtn" id="teJump" aria-label="離れの直前へ" title="離れの直前へ"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M14 4h2v12h-2zM4 4v12l9-6z"/></svg></button>
+      <button type="button" class="tbtn" id="teBack" aria-label="1コマ戻る"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M13 4v12L5 10z"/></svg></button>
+      <button type="button" class="tbtn play" id="tePlay" aria-label="再生"><svg viewBox="0 0 20 20" fill="currentColor" id="tePlayIcon"><path d="M6 4v12l10-6z"/></svg></button>
+      <button type="button" class="tbtn" id="teFwd" aria-label="1コマ進む"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M7 4v12l8-6z"/></svg></button>
+      <div class="rate" id="teRate" role="group" aria-label="再生の速さ（実際の速さに対して）">
+        <button type="button" data-rate="0.125" aria-pressed="false">⅛</button>
+        <button type="button" data-rate="0.25" aria-pressed="true">¼</button>
+        <button type="button" data-rate="1" aria-pressed="false">1×</button>
+      </div>
+      <span class="time num" id="teTime">—</span>
+    </div>
+    <div class="tl-wrap">
+      <canvas id="teTimeline" aria-label="引分けから残心までのタイムライン。タップで移動"></canvas>
+      <label class="te-zoom"><input type="checkbox" id="teZoom" checked> 離れの前後（−0.5〜＋0.6秒）を拡大</label>
+    </div>
+    <details class="adjust te-adj">
+      <summary>離れの位置を直す</summary>
+      <div class="adj-list" id="teAdj"></div>
+    </details>
+  </section>
+
+  <section class="m-te" aria-labelledby="h-tem">
+    <div class="sec-h"><h2 id="h-tem">手の内とひねりの計測</h2><span class="sub">行を押すとその場面へ移動</span></div>
+    <div id="teMetrics"></div>
+    <div class="copy-row">
+      <button type="button" class="btn ghost small" id="teCopy">結果を文章でコピー</button>
+      <span class="msg" id="teCopyMsg" aria-live="polite"></span>
+    </div>
+    <textarea id="teCopyFallback" hidden readonly aria-label="結果の文章"></textarea>
+  </section>
+
+  <section class="m-te" aria-labelledby="h-tec">
+    <div class="sec-h"><h2 id="h-tec">角度の推移</h2><span class="sub">離れを 0 とした時刻。目盛りの数はミリ秒</span></div>
+    <div class="chart-box">
+      <div class="legend" id="teLegend"></div>
+      <canvas id="teChart" aria-label="捻りと角見の角度の推移。タップで移動"></canvas>
+    </div>
+  </section>
+
   <section aria-labelledby="h-set">
     <div class="sec-h"><h2 id="h-set">設定と注意</h2></div>
     <div class="settings">
       <label class="field"><span>身長（cm）。長さの換算に使います</span><input type="number" id="height" min="120" max="210" step="1" value="165" inputmode="numeric"></label>
-      <label class="field"><span>解析の精度</span><select id="modelSel"><option value="thunder">高精度（時間がかかる）</option><option value="lightning">速さ優先</option></select></label>
-      <label class="field"><span>解析の細かさ</span><select id="fpsSel"><option value="6">毎秒 6 コマ</option><option value="10" selected>毎秒 10 コマ</option><option value="15">毎秒 15 コマ</option></select></label>
+      <label class="field m-sk"><span>解析の精度</span><select id="modelSel"><option value="thunder">高精度（時間がかかる）</option><option value="lightning">速さ優先</option></select></label>
+      <label class="field m-sk"><span>解析の細かさ</span><select id="fpsSel"><option value="6">毎秒 6 コマ</option><option value="10" selected>毎秒 10 コマ</option><option value="15">毎秒 15 コマ</option></select></label>
+      <label class="field m-te"><span>目印の間隔（黄と青の中心の間、cm）。長さの換算に使います</span><input type="number" id="spacing" min="2" max="12" step="0.5" value="5" inputmode="decimal"></label>
     </div>
-    <ul class="limits">
+    <ul class="limits m-te">
+      <li>接写もカメラ1台の平面の解析です。手が画面に対して斜めに写ると、角度は小さめに出ます。三脚で水平に、手に対してまっすぐ撮ってください。</li>
+      <li>弓手は手の21点を推定します。弓の陰に隠れる中指・薬指・小指は推定なので参考です。</li>
+      <li>馬手の捻りは、ゆがけの甲の黄と青の目印を結ぶ線の、水平からの傾きです。カメラが傾くとそのままずれます。</li>
+      <li>離れの瞬間の速さや、止まるまでの時間は、実時間で毎秒120コマ以上のスロー撮影で測れます。普通の撮影では、その項目に「スロー撮影で測れます」と出ます。</li>
+      <li>判定の目安は一般的な指導の考え方を数値にしたものです。流派や指導者の方針を優先してください。</li>
+    </ul>
+    <ul class="limits m-sk">
       <li>カメラ1台ずつの平面の解析です。角度や長さは、撮る位置や傾きで数度・数cm変わります。三脚で水平に撮ると安定します。</li>
       <li>検出するのは体の17点（鼻・目・耳・肩・肘・手首・腰・膝・足首）です。弓・矢・手の内・ゆがけは検出しません。矢は両手首の位置から推定して描いています。</li>
       <li>八節の区切りは拳の動きから自動で推定します。足踏み・胴造り・弓構えの境目は特にずれやすいので、必要なら上の「区切りと時刻合わせを直す」で直してください。</li>
