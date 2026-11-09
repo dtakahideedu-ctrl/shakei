@@ -52,6 +52,25 @@ const Kyu = (() => {
     for (const f of fr) { if (!frames.length || f.t - frames[frames.length - 1].t > 1e-4) frames.push(f); }
     track.frames = frames;
     const n = frames.length;
+    // 1 コマだけ跳ねた点（左右の取り違えや見失い）を、前後のコマの間に戻す。元のコマは書き換えない
+    const kk = frames.map(f => f.k);
+    const tolPx = 0.025 * Math.max(track.w || 0, track.h || 0, 100);
+    for (let i = 1; i < n - 1; i++) {
+      const a = frames[i - 1], c = frames[i + 1], ti = frames[i].t;
+      if (c.t - a.t > 0.6) continue;
+      const u = (ti - a.t) / (c.t - a.t);
+      let out = null;
+      for (let j = 0; j < NK; j++) {
+        const ax = a.k[j * 3], ay = a.k[j * 3 + 1], cx = c.k[j * 3], cy = c.k[j * 3 + 1];
+        const mx = ax + (cx - ax) * u, my = ay + (cy - ay) * u;
+        const p = kk[i], dev = Math.hypot(p[j * 3] - mx, p[j * 3 + 1] - my), span = Math.hypot(cx - ax, cy - ay);
+        if (dev > tolPx && dev > 2.5 * span) {
+          if (!out) out = p.slice();
+          out[j * 3] = mx; out[j * 3 + 1] = my; out[j * 3 + 2] = Math.min(p[j * 3 + 2], a.k[j * 3 + 2], c.k[j * 3 + 2]) * 0.6;
+        }
+      }
+      if (out) kk[i] = out;
+    }
     // 時間方向の平滑化（信頼度で重み付け）
     const sigma = 0.06, win = sigma * 2.5;
     const sm = new Array(n);
@@ -65,9 +84,9 @@ const Kyu = (() => {
         for (let q = lo; q < n && frames[q].t <= t + win; q++) {
           const dt = frames[q].t - t;
           const g = Math.exp(-dt * dt / (2 * sigma * sigma));
-          const s = frames[q].k[j * 3 + 2];
+          const s = kk[q][j * 3 + 2];
           const w = g * Math.max(s, 0.03) * Math.max(s, 0.03);
-          sx += frames[q].k[j * 3] * w; sy += frames[q].k[j * 3 + 1] * w; sw += w;
+          sx += kk[q][j * 3] * w; sy += kk[q][j * 3 + 1] * w; sw += w;
           ss += s * g; swc += g;
         }
         out[j * 3] = sx / sw; out[j * 3 + 1] = sy / sw; out[j * 3 + 2] = ss / swc;
@@ -160,7 +179,7 @@ const Kyu = (() => {
   function detectPhases(track) {
     const { G, gt } = track.grid; const sig = track.sig;
     if (G < 30) return null;
-    const { h, vL, vR, sep, ank } = sig;
+    const { h, vL, vR, sep } = sig;
     const wOK = (g) => Math.min(track.grid.S[9][g], track.grid.S[10][g]) > 0.15;
     // 会の判定用: ±0.2 秒の長い基線で測った拳の速さ（細かな揺れに強い）
     const { X, Y, S } = track.grid; const Tn = track.T;
@@ -184,21 +203,24 @@ const Kyu = (() => {
     // 離れの候補: 前に静止（会）、後にも静止（残心）があり、直後に拳が大きく下がらない（弓倒しでない）山
     const nG = (sec) => Math.round(sec / DT);
     const meanV = (a, b) => { let m = 0, c = 0; for (let q = Math.max(0, a); q <= Math.min(G - 1, b); q++) { m += vmax[q]; c++; } return c ? m / c : Infinity; };
+    // 前後の静かさで重みを付けて一番の山を選ぶ（実際の動画は会の間も少し揺れるので、しきい値で切らない）
     let bestScore = -Infinity, cand = -1;
     for (let g = iTop + 3; g < G - 1; g++) {
       if (vR[g] < vp * 0.25 || vR[g] < vR[g - 1] || vR[g] < vR[g + 1]) continue;
       const dh = h[Math.min(G - 1, g + nG(0.8))] - h[Math.max(0, g - nG(0.3))];
       if (dh < -0.6) continue;
       const pre = meanV(g - nG(1.3), g - nG(0.35)), post = meanV(g + nG(0.45), g + nG(1.4));
-      if (pre > thr0 * 1.3 || post > thr0 * 2) continue;
-      if (vR[g] > bestScore) { bestScore = vR[g]; cand = g; }
+      if (!Number.isFinite(pre) || !Number.isFinite(post)) continue;
+      const score = vR[g] / (1 + pre / thr0 + post / (2 * thr0));
+      if (score > bestScore) { bestScore = score; cand = g; }
     }
     if (cand >= 0) { iPeak = cand; vp = vR[cand]; }
     // 速度が最大値の半分を超えた瞬間を離れとする
     let iH = iPeak;
     while (iH > iTop && vR[iH - 1] > vp * 0.4) iH--;
-    // 会: 離れの前、両拳がほぼ止まっている区間
-    const thr = thr0;
+    // 会: 離れの前、両拳がほぼ止まっている区間。実際の動画は会の間も少し揺れるので、離れの直前の揺れに合わせてしきい値を上げる
+    const kaiNoise = median(Array.from(vmax.slice(Math.max(iTop, iH - nG(1.2)), Math.max(iTop + 1, iH - nG(0.25)))));
+    const thr = Math.max(thr0, Number.isFinite(kaiNoise) ? Math.min(kaiNoise * 1.8, thr0 * 4) : thr0);
     let g = iH - 1, over = 0, iKai = iH;
     while (g > iTop && vmax[g] > thr && iH - g < 12) g--; // 離れの立ち上がりを除く
     for (; g > iTop; g--) {
@@ -225,35 +247,48 @@ const Kyu = (() => {
     let iEnd = G - 1;
     for (let q2 = iH5; q2 < G; q2++) { if (h[q2] < hz - 0.3) { iEnd = q2; break; } }
     let iHanEnd = Math.min(iEnd, iH + Math.round(0.35 / DT));
-    // 足踏み: 足首の開きが落ち着くまで
+    // 足踏み: 足首の開きが落ち着くまで。足首の点はよく揺れるので、前後 0.4 秒の中央値でならす
+    const ank = new Float32Array(G), hw = Math.round(0.4 / DT);
+    for (let q2 = 0; q2 < G; q2++) ank[q2] = median(Array.from(sig.ank.slice(Math.max(0, q2 - hw), Math.min(G, q2 + hw + 1))));
     const ankFinal = median(Array.from(ank.slice(Math.max(0, iUchi - Math.round(2 / DT)), iUchi + 1)));
     let iAshi = 0;
     for (let q2 = 0; q2 < iUchi && ankFinal > 0.35; q2++) {
-      if (ank[q2] >= ankFinal * 0.9) {
+      if (ank[q2] >= ankFinal * 0.8) {
         let okk = true;
-        for (let z = q2; z < Math.min(iUchi, q2 + Math.round(1 / DT)); z++) if (ank[z] < ankFinal * 0.85) { okk = false; break; }
+        for (let z = q2; z < Math.min(iUchi, q2 + Math.round(1 / DT)); z++) if (ank[z] < ankFinal * 0.72) { okk = false; break; }
         if (okk) { iAshi = q2; break; }
       }
     }
     if (iAshi * DT < 0.3) iAshi = 0;
+    // 動画が弓構えの途中から始まっている（取懸けを済ませて拳が腰より上にある）時は、足踏み・胴造りを区切らない
+    const g04 = Math.max(2, Math.round(0.4 / DT));
+    const h0 = median(Array.from(h.slice(0, g04))), sep0 = median(Array.from(sep.slice(0, g04)));
+    const frontView = median(Array.from(sig.shw)) > 0.45; // 正面は肩幅が広く写る
+    // 腰に拳を置いた胴造りなら、このあと打起しまでに拳がもう一段上がる（弓構え）。上がらなければ弓構えから写っている
+    let riseLater = false;
+    for (let q2 = g04, run = 0; q2 < iUchi; q2++) { if (h[q2] > h0 + 0.2) { if (++run * DT >= 0.3) { riseLater = true; break; } } else run = 0; }
+    const raised = h0 > -0.75 || (frontView && sep0 < 0.5 && h0 > -0.95);
+    const inYugamae = iAshi === 0 && iUchi > 0 && h0 < h[iTop] - 0.5 && raised && !riseLater;
     // 弓構え: 拳が腰から体の前へ上がる所
-    let iYu = -1;
+    let iYu = inYugamae ? 0 : -1;
     const hRest = percentile(Array.from(h.slice(iAshi, Math.max(iAshi + 1, iUchi))), 0.1);
-    for (let q2 = iAshi; q2 < iUchi; q2++) {
+    for (let q2 = iAshi; q2 < iUchi && !inYugamae; q2++) {
       if (h[q2] > hRest + 0.15) {
         let okk = true;
         for (let z = q2; z < Math.min(iUchi, q2 + Math.round(0.3 / DT)); z++) if (h[z] <= hRest + 0.15) { okk = false; break; }
         if (okk) { iYu = q2; break; }
       }
     }
-    if (iYu < 0 || iYu <= iAshi) iYu = Math.round((iAshi + iUchi) / 2);
+    if (!inYugamae && (iYu < 0 || iYu <= iAshi)) iYu = Math.round((iAshi + iUchi) / 2);
     const T = (i) => gt[clamp(i, 0, G - 1)];
     const bounds = [T(0), T(iAshi), T(iYu), T(iUchi), T(iDai), T(iKai), T(iH), T(iHanEnd), T(iEnd)];
     // 単調にそろえる
     for (let i = 1; i < bounds.length; i++) if (bounds[i] < bounds[i - 1]) bounds[i] = bounds[i - 1];
     return {
       bounds, // 9 個の境界 = 8 区間
-      tTop: T(iTop), tHanare: T(iH), tKai: T(iKai), auto: true
+      tTop: T(iTop), tHanare: T(iH), tKai: T(iKai), auto: true,
+      // 動画が始まる前に済んでいた節の数（0: 足踏みから写っている、1: 胴造りから、2: 弓構えから、3: 打起しから）
+      skipped: iUchi === 0 ? 3 : inYugamae || iYu === 0 ? 2 : frontView && ankFinal > 0.35 && iAshi === 0 && ank[0] >= ankFinal * 0.8 ? 1 : 0
     };
   }
 

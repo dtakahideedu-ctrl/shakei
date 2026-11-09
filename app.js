@@ -960,7 +960,9 @@ function renderPhaseRow() {
   PH.forEach((p, i) => {
     const b = document.createElement('button'); b.type = 'button'; b.className = 'ph';
     const d = S.ph ? S.ph.bounds[i + 1] - S.ph.bounds[i] : NaN;
-    b.innerHTML = `<b>${p.name}</b><span>${Number.isFinite(d) ? d.toFixed(1) + '秒' : '—'}</span>`;
+    const before = S.ph && i < (S.ph.skipped || 0) && d < 0.05; // 撮影が始まる前に済んでいた節
+    if (before) b.classList.add('skip');
+    b.innerHTML = `<b>${p.name}</b><span>${before ? '撮影前' : Number.isFinite(d) ? d.toFixed(1) + '秒' : '—'}</span>`;
     b.addEventListener('click', () => { if (!S.ph) return; pause(); setTime(S.ph.bounds[i] + 0.01); });
     row.appendChild(b);
   });
@@ -1076,6 +1078,10 @@ function renderMetrics() {
   const kai = S.metrics.find(m => m.key === 'kaiLen');
   const warns = S.metrics.filter(m => m.status === 'warn');
   let html = S.ph && S.ph.fallback ? `<p class="empty-note" style="margin:0 0 12px">八節を自動で区切れなかったので、仮に等分しています。「区切りと時刻合わせを直す」で区切りを合わせると、計測も正しくなります。</p>` : '';
+  const SKIP_NOTE = ['', '動画が胴造りから始まっているので、足踏みは区切らずに測っています。足踏みの幅などは、胴造りの間の姿勢から測っています。',
+    '動画が弓構えから始まっているので、足踏み・胴造りは区切らずに測っています。足踏み・胴造りの項目は、弓構えの間の姿勢から測っています。',
+    '動画が打起しから始まっているので、それより前の節は区切らずに測っています。足踏み・胴造りの項目は測れません。'];
+  if (S.ph && !S.ph.fallback && S.ph.skipped) html += `<p class="empty-note" style="margin:0 0 12px">${SKIP_NOTE[S.ph.skipped]}</p>`;
   html += `<div class="overview"><div class="ov-kai"><small>会の長さ</small><strong class="num">${kai && Number.isFinite(kai.value) ? kai.value.toFixed(1) : '—'}<em>秒</em></strong></div><div class="ov-list"><span class="lead">${warns.length ? `見直したい点 ${warns.length} 項目` : '目安から外れた項目はありません'}</span>`;
   const dup = (lab) => S.metrics.filter(x => x.label === lab).length > 1;
   const gname = (g) => (GROUPS.find(x => x[0] === g) || [, ''])[1];
