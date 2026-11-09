@@ -25,7 +25,7 @@ let uiMode = 'shakei';
 const S = {
   sample: true, layout: '3d', t: 0, playing: false, rate: 0.5,
   layers: { skel: true, arrow: true, cross: true, trail: false },
-  master: 'front', offset: 0, offsetAuto: 0, syncMethod: '', ph: null, metrics: [],
+  master: 'front', offset: 0, offsetAuto: 0, offsetManual: false, align: null, syncMethod: '', ph: null, metrics: [],
   heightCm: Number(store.get('height')) || 165,
   model: store.get('model') || 'thunder', fps: Number(store.get('fps')) || 10,
   busy: false,
@@ -118,8 +118,8 @@ function exitSample() {
   S.sample = false;
   for (const v of Object.values(V)) { v.track = null; v.status = 'empty'; v.w = v.h = v.duration = 0; v.sampleBg = false; }
   const tg = S.target; tg.src = null; tg.calib = null; tg.marks = []; tg.step = 0; tg.shot = 0;
-  $('#sampleBanner').hidden = true;
-  S.ph = null; S.metrics = []; S.t = 0;
+  syncBanner();
+  S.ph = null; S.metrics = []; S.t = 0; S.offsetManual = false; S.align = null;
 }
 
 // ---------- 解析結果のまとめ ----------
@@ -127,9 +127,9 @@ function recompute(resetPhases) {
   const F = V.front.track, D = V.side.track;
   S.master = F ? 'front' : (D ? 'side' : (V.front.status !== 'empty' ? 'front' : (V.side.status !== 'empty' ? 'side' : 'front')));
   if (F && D) {
-    const sy = K.syncOffset(F, D);
+    const sy = computeSync(F, D);
     S.offsetAuto = sy.offset; S.syncMethod = sy.method;
-    if (resetPhases) S.offset = sy.offset;
+    if (resetPhases || !S.offsetManual) S.offset = sy.offset;
   } else if (resetPhases) { S.offset = 0; S.offsetAuto = 0; S.syncMethod = ''; }
   const M = masterTrack();
   if (!M) { S.ph = null; S.metrics = []; S.fz = null; renderAll(); return; }
@@ -144,12 +144,25 @@ function recompute(resetPhases) {
     if (F && D && Number.isFinite(SH.shot.offset)) S.offset = SH.shot.offset;
   }
   S.fz = F && D && S.ph ? K.fuseSetup(F, D, S.ph, S.offset, S.heightCm) : null;
+  // 1 本だけ（または 2 本を組み合わせられない時）は、その動画から奥行きを推して立体にする
+  if (!S.fz && S.ph && M) { S.fz = K.fuseSingle(M, S.master, S.ph, S.heightCm); if (S.fz && F && D) S.fz.fallback = true; }
   try {
     S.metrics = K.computeMetrics({ front: F, side: D, ph: S.ph, offset: S.offset, heightCm: S.heightCm, master: S.master });
   } catch (e) { console.error(e); S.metrics = []; }
   renderAll();
 }
 const clonePh = (p) => ({ ...p, bounds: p.bounds.slice() });
+// 2 本のずれ: 両方の音があれば音（弦音など）で、なければ体の動きで
+let syncCache = null;
+function computeSync(F, D) {
+  const motion = K.syncOffset(F, D), a = V.front.audio, b = V.side.audio;
+  let au = null;
+  if (a && b) {
+    if (syncCache && syncCache.a === a && syncCache.b === b) au = syncCache.res;
+    else { try { au = K.audioSync(a, b); } catch (e) { au = null; } syncCache = { a, b, res: au }; }
+  }
+  return K.chooseSync(motion, au) || motion;
+}
 
 // ---------- 描画: 動画の上 ----------
 let dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -580,13 +593,24 @@ function drawTop() {
     ctx.fillText('動画は 斜め・正面・馬手側 から見ると重なります', W / 2, H - 12 * dpr); ctx.textAlign = 'left';
   }
   if (!S.fz) {
+    $('#topNote').hidden = true;
     TOP.msg.hidden = false;
-    TOP.msg.textContent = V.front.track && V.side.track ? '2本の動画を立体に組み立てられませんでした。「区切りと時刻合わせを直す」で時刻のずれを合わせてください。' : (V.front.track || V.side.track ? '立体の図は、正面と馬手側の両方を解析すると表示されます。' : '正面と馬手側の動画を解析すると、2方向を合成して立体で見られます。');
+    TOP.msg.textContent = V.front.track || V.side.track ? '立体に組み立てられませんでした。動画に足踏みから残心まで全身が写っているか確かめてください。' : '正面か馬手側の動画を解析すると、立体で見られます。2本そろうと、2方向を合わせてより正確になります。';
     TOP.hudPhase.textContent = ''; TOP.hudVal.textContent = '';
     return;
   }
   TOP.msg.hidden = true;
   const p3 = K.pose3dAt(S.fz, S.t);
+  // 1 本の動画から推した立体であることを、図の下に書く
+  {
+    const note = $('#topNote'), f = S.fz.single;
+    note.hidden = !f;
+    if (f) {
+      const nm = f === 'front' ? '正面' : '馬手側', miss = f === 'front' ? '前後' : '的の方向';
+      note.textContent = S.fz.fallback ? `2本の動画を組み合わせられなかったので、${nm}の動画だけから推定しています。「区切りと時刻合わせを直す」で時刻を合わせると、2方向で組み立てます。`
+        : `${nm}の動画だけから推定した立体です。${miss}の位置は、体の寸法と射法の形から推しています。もう1方向の動画があると正確になります。`;
+    }
+  }
   const pi = S.ph ? K.phaseAt(S.ph.bounds, S.t) : -1;
   TOP.hudPhase.textContent = pi >= 0 ? PH[pi].name : '';
   // 床の上の方角
@@ -673,7 +697,7 @@ function drawTop() {
       ctx.fillStyle = '#d9dde3'; ctx.beginPath();
       ctx.moveTo(B.x + vx / vn * hl, B.y + vy / vn * hl); ctx.lineTo(B.x - vy / vn * hl * 0.45, B.y + vx / vn * hl * 0.45); ctx.lineTo(B.x + vy / vn * hl * 0.45, B.y - vx / vn * hl * 0.45); ctx.closePath(); ctx.fill();
     } });
-    if (pi === 5) {
+    if (pi === 5 && !S.fz.single) {
       const ref = Math.atan2(la.z - ra.z, la.x - ra.x), a = (Math.atan2(d.z, d.x) - ref) * 180 / Math.PI;
       hud = `矢先 ${a >= 0 ? '前' : '後ろ'}へ ${Math.abs(a).toFixed(1)}°`;
     }
@@ -683,7 +707,7 @@ function drawTop() {
   ctx.globalAlpha = 1; ctx.setLineDash([]);
   if (!hud && pi >= 1) {
     const ref = Math.atan2(la.z - ra.z, la.x - ra.x), a = (Math.atan2(p3[5].z - p3[6].z, p3[5].x - p3[6].x) - ref) * 180 / Math.PI;
-    if (Number.isFinite(a)) hud = `肩 ${a >= 0 ? '弓手側' : '馬手側'}が前へ ${Math.abs(a).toFixed(1)}°`;
+    if (Number.isFinite(a) && !S.fz.single) hud = `肩 ${a >= 0 ? '弓手側' : '馬手側'}が前へ ${Math.abs(a).toFixed(1)}°`;
   }
   TOP.hudVal.textContent = hud;
 }
@@ -971,11 +995,14 @@ function renderAdjust() {
   });
   if (V.front.track && V.side.track) {
     const row = document.createElement('div'); row.className = 'adj-row';
-    row.innerHTML = `<span class="lbl">馬手側の時刻のずれ <small style="color:var(--muted)">（自動: ${S.syncMethod}）</small></span><span class="tv">${S.offset >= 0 ? '+' : ''}${S.offset.toFixed(2)}秒</span><button type="button" data-o="-0.033">−1コマ</button><button type="button" data-o="0.033">＋1コマ</button><button type="button" data-auto>自動</button>`;
+    const manual = S.offsetManual || (SH.shot && Number.isFinite(SH.shot.offset));
+    row.innerHTML = `<span class="lbl">馬手側の時刻のずれ <small style="color:var(--muted)">（${manual ? '手で直した値' : '自動: ' + S.syncMethod}）</small></span><span class="tv">${S.offset >= 0 ? '+' : ''}${S.offset.toFixed(2)}秒</span><button type="button" data-o="-0.033">−1コマ</button><button type="button" data-o="0.033">＋1コマ</button><button type="button" data-auto>自動</button><button type="button" class="wide-btn" data-align>離れの瞬間で合わせる（2画面で確かめながら）</button>`;
     row.addEventListener('click', (e) => {
       const btn = e.target.closest('button'); if (!btn) return;
+      if (btn.hasAttribute('data-align')) { startAlign(); return; }
       const auto = btn.hasAttribute('data-auto');
       S.offset = auto ? S.offsetAuto : S.offset + Number(btn.dataset.o);
+      S.offsetManual = !auto;
       shareShot({ offset: auto ? null : S.offset });
       if (SH.shot) SH.shot = { ...SH.shot, offset: auto ? null : S.offset };
       recompute(false); setTime(S.t);
@@ -983,6 +1010,49 @@ function renderAdjust() {
     L.appendChild(row);
   }
 }
+// ---- 離れの瞬間で 2 本をそろえる（正面 → 馬手側の順に、離れのコマを示す） ----
+function startAlign() {
+  if (!(V.front.track && V.side.track) || S.busy) return;
+  pause();
+  S.align = { step: 1, layout: S.layout, offset: S.offset };
+  setLayout('front');
+  const ph = V.front.track.phasesAuto || S.ph;
+  if (ph) setTime(ph.tHanare);
+  renderAlign();
+  $('#viewer').scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+}
+function renderAlign() {
+  const bar = $('#alignBar'), a = S.align;
+  bar.hidden = !a; if (!a) return;
+  if (a.step === 1) {
+    $('#alignMsg').innerHTML = '<b>1/2 正面</b>　動画を離れの瞬間（弦から矢が離れたコマ）に合わせて「ここが離れ」を押してください。下の ◀ ▶ で1コマずつ動かせます。';
+    $('#alignBtns').innerHTML = '<button type="button" class="btn small" data-a="here">ここが離れ</button><button type="button" class="btn small ghost" data-a="cancel">やめる</button>';
+  } else {
+    $('#alignMsg').innerHTML = '<b>2/2 馬手側</b>　馬手側の動画も離れの瞬間に合わせて「これで合わせる」を押してください。下のボタンでは馬手側だけが動きます。';
+    $('#alignBtns').innerHTML = '<button type="button" data-a="s" data-d="-0.5">◀◀ 0.5秒</button><button type="button" data-a="s" data-d="-1f">◀ 1コマ</button><button type="button" data-a="s" data-d="1f">1コマ ▶</button><button type="button" data-a="s" data-d="0.5">0.5秒 ▶▶</button><button type="button" class="btn small" data-a="ok">これで合わせる</button><button type="button" class="btn small ghost" data-a="cancel">やめる</button>';
+  }
+}
+$('#alignBtns').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); const a = S.align; if (!b || !a) return;
+  const act = b.dataset.a;
+  if (act === 'cancel') { S.offset = a.offset; S.align = null; setLayout(a.layout); recompute(false); setTime(S.t); renderAlign(); return; }
+  if (act === 'here') {
+    pause(); a.tf = S.t; a.step = 2;
+    // 馬手側は、自動で見つけた離れのコマから始める
+    const ps = V.side.track.phasesAuto; if (ps) S.offset = a.tf - ps.tHanare;
+    setLayout('side'); setTime(a.tf); renderAlign(); return;
+  }
+  if (act === 's') {
+    const d = b.dataset.d.endsWith('f') ? Number(b.dataset.d.slice(0, -1)) / 30 : Number(b.dataset.d); S.offset -= d;
+    V.side.cap.textContent = `時刻のずれ ${S.offset >= 0 ? '+' : ''}${S.offset.toFixed(2)} 秒`;
+    setTime(S.t); return;
+  }
+  if (act === 'ok') {
+    S.offsetManual = true; shareShot({ offset: S.offset }); if (SH.shot) SH.shot = { ...SH.shot, offset: S.offset };
+    const t = a.tf; S.align = null; setLayout(a.layout === 'side' || a.layout === 'front' ? 'both' : a.layout);
+    recompute(false); setTime(t); renderAlign();
+  }
+});
 function setBound(i, nv) {
   const b = S.ph.bounds;
   b[i] = clamp(nv, b[i - 1], i < 8 ? b[i + 1] : masterDuration());
@@ -1105,10 +1175,10 @@ chart.addEventListener('click', (e) => {
 
 // ---------- 矢所 ----------
 const photo = $('#photo');
-const STEP_HINT = ['写真の的の中心をタップしてください。', '的の右の縁（外黒の外側）をタップしてください。', '的の上の縁をタップしてください。', '矢の刺さった所をタップすると印が付きます。印はドラッグで動かせます。'];
+const STEP_HINT = ['的の中心（中白）をタップすると、輪を自動で合わせます。', '輪を自動で合わせられませんでした。的の右の縁（外黒の外側）をタップしてください。', '的の上の縁をタップしてください。', '矢所をタップすると印が付きます。輪がずれていたら白い丸を、印は印をドラッグして直します。'];
 function renderTarget() {
   const tg = S.target;
-  $$('#steps .step').forEach((s, i) => { s.setAttribute('aria-current', String(tg.src && tg.step === i)); s.classList.toggle('done', !!tg.src && tg.step > i); });
+  $$('#steps .step').forEach((s) => { const k = Number(s.dataset.step); s.setAttribute('aria-current', String(!!tg.src && (k === 3 ? tg.step === 3 : tg.step < 3))); s.classList.toggle('done', !!tg.src && k === 0 && tg.step === 3); });
   $('#stepHint').textContent = tg.src ? STEP_HINT[tg.step] : '上の「矢所の写真」から写真を選んでください。';
   drawPhoto(); renderSchem();
 }
@@ -1144,6 +1214,13 @@ function drawPhoto() {
       ctx.globalAlpha = 0.9; ctx.setLineDash([5 * dpr, 4 * dpr]);
       for (const [r] of K.KASUMI) { ctx.beginPath(); ctx.ellipse(X, Y, rx * s * r / 18, ry * s * r / 18, 0, 0, Math.PI * 2); ctx.stroke(); }
       ctx.setLineDash([]); ctx.globalAlpha = 1;
+      // 輪を直すつまみ（中心・右・上）
+      if (tg.step === 3 && tg.calib) {
+        for (const [hx, hy] of [[X, Y], [X + rx * s, Y], [X, Y - ry * s]]) {
+          ctx.beginPath(); ctx.arc(hx, hy, 7 * dpr, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,.95)'; ctx.fill();
+          ctx.lineWidth = 2 * dpr; ctx.strokeStyle = C['ov-guide']; ctx.stroke();
+        }
+      }
     }
   }
   ctx.font = `700 ${Math.round(12 * dpr)}px ${getComputedStyle(document.body).fontFamily}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1156,28 +1233,72 @@ function drawPhoto() {
   });
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
 }
+// 写真の輝度（明るさ）を、指定の範囲だけ W×H に縮めて取り出す
+function lumOf(src, sx, sy, sw, sh, W, H) {
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(src, sx, sy, sw, sh, 0, 0, W, H);
+  const d = g.getImageData(0, 0, W, H).data, L = new Float32Array(W * H);
+  for (let i = 0, j = 0; j < L.length; i += 4, j++) L[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  return L;
+}
+// 中心のタップから、霞的の輪の並びに合う楕円を探す。見つからなければ null
+function autoFitTarget(tg, px, py) {
+  try {
+    const s = Math.min(1, 900 / Math.max(tg.w, tg.h)), W = Math.max(2, Math.round(tg.w * s)), H = Math.max(2, Math.round(tg.h * s));
+    const r = K.fitTarget(lumOf(tg.src, 0, 0, tg.w, tg.h, W, H), W, H, px * s, py * s);
+    let fit = r ? { cx: r.cx / s, cy: r.cy / s, rx: r.rx / s, ry: r.ry / s } : null;
+    // 的が小さく写っている時は、まわりを切り出して細かく合わせ直す
+    if (!fit || Math.max(fit.rx, fit.ry) * s < 70) {
+      const half = fit ? Math.max(fit.rx, fit.ry) * 1.7 : Math.max(tg.w, tg.h) * 0.18;
+      const ccx = fit ? fit.cx : px, ccy = fit ? fit.cy : py;
+      const x0 = clamp(ccx - half, 0, tg.w - 2), y0 = clamp(ccy - half, 0, tg.h - 2), x1 = clamp(ccx + half, x0 + 2, tg.w), y1 = clamp(ccy + half, y0 + 2, tg.h);
+      const k = Math.min(4, 600 / Math.max(x1 - x0, y1 - y0)), CW = Math.max(2, Math.round((x1 - x0) * k)), CH = Math.max(2, Math.round((y1 - y0) * k));
+      const r2 = K.fitTarget(lumOf(tg.src, x0, y0, x1 - x0, y1 - y0, CW, CH), CW, CH, (ccx - x0) * k, (ccy - y0) * k);
+      if (r2) fit = { cx: x0 + r2.cx / k, cy: y0 + r2.cy / k, rx: r2.rx / k, ry: r2.ry / k };
+    }
+    return fit;
+  } catch (e) { console.warn(e); return null; }
+}
 let drag = null;
 function photoPt(e) { const r = photo.getBoundingClientRect(); return { x: (e.clientX - r.left) / r.width * S.target.w, y: (e.clientY - r.top) / r.height * S.target.h }; }
 photo.addEventListener('pointerdown', (e) => {
   const tg = S.target; if (!tg.src) return;
   const p = photoPt(e);
   const tol = 20 / (photo.getBoundingClientRect().width / tg.w);
-  const hit = tg.step === 3 ? tg.marks.findIndex(m => Math.hypot(m.x - p.x, m.y - p.y) < tol) : -1;
-  drag = { i: hit, start: p, moved: false };
+  let hit = -1, hd = tol, handle = null;
+  if (tg.step === 3) tg.marks.forEach((m, i) => { const d = Math.hypot(m.x - p.x, m.y - p.y); if (d < hd) { hd = d; hit = i; } });
+  if (tg.step === 3 && tg.calib) {
+    const c = tg.calib;
+    for (const [k, hx, hy] of [['c', c.cx, c.cy], ['r', c.cx + c.rx, c.cy], ['t', c.cx, c.cy - c.ry]]) { const d = Math.hypot(hx - p.x, hy - p.y); if (d < hd) { hd = d; handle = k; hit = -1; } }
+  }
+  drag = { i: hit, handle, c0: tg.calib ? { ...tg.calib } : null, start: p, moved: false };
   SH.dragging = true;
   photo.setPointerCapture(e.pointerId);
 });
 photo.addEventListener('pointermove', (e) => {
-  if (!drag || drag.i < 0) return;
+  if (!drag) return;
   const p = photoPt(e);
   if (Math.hypot(p.x - drag.start.x, p.y - drag.start.y) > 2) drag.moved = true;
+  if (drag.handle && drag.moved) {
+    const c = S.target.calib, c0 = drag.c0;
+    if (drag.handle === 'c') { c.cx = c0.cx + p.x - drag.start.x; c.cy = c0.cy + p.y - drag.start.y; }
+    else if (drag.handle === 'r') c.rx = Math.max(5, Math.abs(p.x - c.cx));
+    else c.ry = Math.max(5, Math.abs(c.cy - p.y));
+    drawPhoto(); renderSchem(); return;
+  }
+  if (drag.i < 0) return;
   S.target.marks[drag.i] = p; drawPhoto(); renderSchem();
 });
 photo.addEventListener('pointerup', (e) => {
   const tg = S.target; if (!drag) return;
   const p = photoPt(e); const d = drag; drag = null; SH.dragging = false;
+  if (d.handle && d.moved) { renderTarget(); shareTarget(); return; }
   if (d.i >= 0) { if (!d.moved) { tg.shot = tg.shot === d.i + 1 ? 0 : d.i + 1; } renderTarget(); renderSlots(); shareTarget(); return; }
-  if (tg.step === 0) { tg.tmp = { cx: p.x, cy: p.y }; tg.calib = null; tg.step = 1; }
+  if (tg.step === 0) {
+    const fit = autoFitTarget(tg, p.x, p.y);
+    if (fit) { tg.calib = fit; tg.tmp = {}; tg.step = 3; }
+    else { tg.tmp = { cx: p.x, cy: p.y }; tg.calib = null; tg.step = 1; }
+  }
   else if (tg.step === 1) { tg.tmp.rx = Math.abs(p.x - tg.tmp.cx) || 1; tg.step = 2; }
   else if (tg.step === 2) { tg.tmp.ry = Math.abs(p.y - tg.tmp.cy) || tg.tmp.rx; tg.calib = { cx: tg.tmp.cx, cy: tg.tmp.cy, rx: tg.tmp.rx, ry: tg.tmp.ry }; tg.step = 3; }
   else { tg.marks.push(p); }
@@ -1246,6 +1367,10 @@ async function onVideoFile(key, file) {
   const v = V[key];
   if (v.url) URL.revokeObjectURL(v.url);
   v.file = file; v.url = URL.createObjectURL(file); v.track = null; v.status = 'loading'; v.pick = null; v.liveK = null; v.sampleBg = false;
+  startAudio(v, file);
+  // 動画を入れ替えたら、手で直した時刻のずれは使わない
+  S.offsetManual = false; S.align = null;
+  if (SH.shot && Number.isFinite(SH.shot.offset)) { SH.shot = { ...SH.shot, offset: null }; shareShot({ offset: null }); }
   renderAll();
   const vid = v.video;
   vid.src = v.url; vid.muted = true; vid.playsInline = true;
@@ -1269,6 +1394,27 @@ async function onVideoFile(key, file) {
   }
   if (!V.front.track && !V.side.track) S.master = key === 'front' || V.front.status !== 'empty' ? 'front' : 'side';
   renderAll();
+}
+// ---------- 音（時刻合わせ用。音の立ち上がりの強さだけを取り出す） ----------
+async function extractAudio(file) {
+  try {
+    if (!file || file.size > 600e6) return null;
+    const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext; if (!AC) return null;
+    const buf = await file.arrayBuffer();
+    const ctx = new AC(1, 1, 44100);
+    const ab = await new Promise((res, rej) => { const p = ctx.decodeAudioData(buf, res, rej); if (p && p.then) p.then(res, rej); });
+    if (!ab || !ab.length) return null;
+    const chs = []; for (let c = 0; c < Math.min(2, ab.numberOfChannels); c++) chs.push(ab.getChannelData(c));
+    const env = K.audioEnvelope(chs, ab.sampleRate, ab.duration > 120 ? 100 : 200);
+    return env.env.some(x => x > 0) ? env : null; // 音のない動画は使わない
+  } catch (e) { return null; }
+}
+function startAudio(v, file) {
+  v.audio = null;
+  v.audioP = extractAudio(file).then(a => {
+    if (v.file === file) { v.audio = a; if (V.front.track && V.side.track && !S.busy) { recompute(false); setTime(S.t); } }
+    return a;
+  });
 }
 function seekTo(video, t) {
   return new Promise((res) => {
@@ -1422,7 +1568,7 @@ async function startAnalysis(keys) {
   S.busy = false; cancelFlag = false; syncModeBtns();
   recompute(true);
   const M = masterTrack();
-  if (S.fz) { CAM.yaw = 0; CAM.pitch = 90; CAM.zoom = 1; setCamPressed('top'); setLayout('3d'); }
+  if (S.fz) { const pre = S.fz.single ? 'oblique' : 'top'; [CAM.yaw, CAM.pitch] = CAM_PRESETS[pre]; CAM.zoom = 1; setCamPressed(pre); setLayout('3d'); }
   if (M && S.ph) setTime((S.ph.bounds[5] + S.ph.tHanare) / 2); else setTime(0);
 }
 
@@ -1659,10 +1805,10 @@ function resetViews() {
   for (const v of Object.values(V)) {
     if (v.url) URL.revokeObjectURL(v.url);
     v.url = null; v.file = null; v.video.removeAttribute('src'); try { v.video.load(); } catch (e) { /* なし */ }
-    Object.assign(v, { track: null, status: 'empty', w: 0, h: 0, duration: 0, sampleBg: false, flip: null, partAt: null, partShot: null, by: null, pick: null, liveK: null, thumbs: null });
+    Object.assign(v, { track: null, status: 'empty', w: 0, h: 0, duration: 0, sampleBg: false, flip: null, partAt: null, partShot: null, by: null, pick: null, liveK: null, thumbs: null, audio: null, audioP: null });
   }
   Object.assign(S.target, { src: null, w: 0, h: 0, calib: null, step: 0, marks: [], rightIsMae: true, shot: 0, tmp: {}, photoId: null, partAt: null, by: null, name: '' });
-  S.ph = null; S.metrics = []; S.fz = null; S.t = 0; S.offset = 0;
+  S.ph = null; S.metrics = []; S.fz = null; S.t = 0; S.offset = 0; S.offsetManual = false; S.align = null;
 }
 function selectShot(id) {
   if (S.busy) return;
@@ -1693,7 +1839,7 @@ async function applyShot(shot) {
       const tr = K.prepareTrack({ view: key, w: p.w, h: p.h, duration: p.duration, frames: frames.map(f => ({ t: f.t, k: f.k })) });
       tr.phasesAuto = K.detectPhases(tr);
       if (v.url) { URL.revokeObjectURL(v.url); v.url = null; v.file = null; v.video.removeAttribute('src'); }
-      Object.assign(v, { track: tr, status: 'done', w: p.w, h: p.h, duration: p.duration, sampleBg: false, partAt: p.at, partShot: id, by: p.dev, flip: makeFlip(p, frames, id), liveK: null });
+      Object.assign(v, { track: tr, status: 'done', w: p.w, h: p.h, duration: p.duration, sampleBg: false, partAt: p.at, partShot: id, by: p.dev, flip: makeFlip(p, frames, id), liveK: null, audio: r.frames.au ? { rate: p.auRate || 200, env: bytesFromB64(r.frames.au) } : null, audioP: null });
       changed = true;
     } catch (e) { console.warn(e); SH.msg = e.message; }
   }
@@ -1766,11 +1912,13 @@ async function sharePart(key, v, frames, thumbs, tH) {
         for (let i = 0; i < blobs.length; i++) { SH.msg = `${v.label}のコマ画像を送っています（${i + 1}/${blobs.length}）…`; renderShotBar(); sheets.push(await uploadBlob(shotId, blobs[i], `${key}-sheet${i}`)); }
       } catch (e) { console.warn(e); sheets = []; }
     }
+    if (v.audioP) { try { await Promise.race([v.audioP, new Promise(r => setTimeout(r, 15000))]); } catch (e) { /* 音なし */ } }
+    const au = v.audio && v.audio.env.length <= 30000 ? b64FromBytes(v.audio.env) : '';
     let fr = frames.map((f, i) => ({ t: f.t, k: f.k, i }));
     let ef = encodeFrames(fr);
     while (ef.k.length > 1200000 && fr.length > 20) { fr = fr.filter((f, j) => j % 2 === 0 || (Number.isFinite(tH) && Math.abs(f.t - tH) < 0.7)); ef = encodeFrames(fr); }
     if (SH.shotId !== shotId) return;
-    const r = await api('putPart', { id: shotId, kind: key, name: SH.name, dev: SH.uid, frames: { t: ef.t, k: ef.k, ti: ef.ti }, meta: { w: v.w, h: v.h, duration: v.duration, n: ef.n, sheets, tile: sheets.length ? { w: thumbs.tw, h: thumbs.th, cols: thumbs.cols, per: thumbs.per } : null } });
+    const r = await api('putPart', { id: shotId, kind: key, name: SH.name, dev: SH.uid, frames: { t: ef.t, k: ef.k, ti: ef.ti, au }, meta: { w: v.w, h: v.h, duration: v.duration, n: ef.n, auRate: au ? v.audio.rate : null, sheets, tile: sheets.length ? { w: thumbs.tw, h: thumbs.th, cols: thumbs.cols, per: thumbs.per } : null } });
     v.partAt = r.at; v.partShot = shotId; v.by = SH.uid; SH.names[SH.uid] = SH.name;
     SH.msg = '';
   } catch (e) { writeError(e); }
@@ -2956,7 +3104,7 @@ function renderAll() {
     v.video.hidden = !hasVid;
   }
   if (V.side.track) { try { S.sideFacing = sideFacingSign(); } catch (e) { S.sideFacing = 1; } }
-  renderShotBar(); layoutFrames(); renderSlots(); renderPaneMsgs(); renderPhaseRow(); renderAdjust(); renderMetrics(); renderTarget();
+  renderShotBar(); layoutFrames(); renderSlots(); renderPaneMsgs(); renderPhaseRow(); renderAdjust(); renderMetrics(); renderTarget(); renderAlign();
   drawAll(); drawTimeline(); drawChart();
 }
 function sideFacingSign() {

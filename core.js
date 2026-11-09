@@ -351,7 +351,78 @@ const Kyu = (() => {
     const pl = Math.hypot(px, py, pz) || 1;
     return { x: S.x + n.x * a + px / pl * h, y: S.y + n.y * a + py / pl * h, z: S.z + n.z * a + pz / pl * h, s: E.s };
   }
+  // ---------- 1 本の動画から立体を推す ----------
+  // 正面の動画なら前後、馬手側の動画なら的の方向が写らない。その向きの位置を、
+  // 体の各部の長さ（身長と動画から）と、射法の形（どちらへ出るか）から推す。測った値ではない。
+  function fuseSingle(track, view, ph, heightCm) {
+    if (!track || !ph || !(track.noseAnkle > 10)) return null;
+    const H = heightCm, cpp = H * 0.88 / track.noseAnkle;
+    const whole = [track.grid.gt[0], track.grid.gt[track.grid.G - 1]];
+    const s0 = ph.bounds[1] + 0.2, s1 = Math.max(ph.bounds[1] + 0.4, ph.bounds[8]);
+    let o = { x: medOver(track, s0, s1, k => (k[15].x + k[16].x) / 2), y: medOver(track, s0, s1, k => (k[15].y + k[16].y) / 2) };
+    if (!Number.isFinite(o.x) || !Number.isFinite(o.y)) o = { x: medOver(track, ...whole, k => (k[15].x + k[16].x) / 2), y: medOver(track, ...whole, k => (k[15].y + k[16].y) / 2) };
+    if (!Number.isFinite(o.x) || !Number.isFinite(o.y)) return null;
+    const B = ph.bounds, kaiA = B[5] + (B[6] - B[5]) * 0.15, kaiB = B[5] + (B[6] - B[5]) * 0.85;
+    const fz = { single: view, track, H, cpp, o, ph };
+    // 動画を立体に重ねる時に使う名前でも持っておく
+    if (view === 'front') { fz.oF = o; fz.cppF = cpp; } else { fz.oS = o; fz.cppS = cpp; }
+    if (view === 'front') fz.sT = targetSign(track, kaiA, kaiB); else fz.sF = facingSign(track, ph.tTop);
+    // 骨の長さ: 身長からの目安と、動画で一番長く写った長さ（画面に沿った時）の大きい方
+    const p95 = (a, b) => {
+      const vals = [];
+      for (let g = 0; g < track.grid.G; g += 2) { const k = kpAtGrid(track, g); if (Math.min(k[a].s, k[b].s) > 0.35) vals.push(Math.hypot(k[b].x - k[a].x, k[b].y - k[a].y) * cpp); }
+      return percentile(vals, 0.95);
+    };
+    const len = (pairs, ref) => { const v = Math.max(...pairs.map(([a, b]) => p95(a, b)).filter(Number.isFinite), 0); return clamp(Math.max(v, ref * 0.9), ref * 0.9, ref * 1.25); };
+    fz.L = {
+      up: len([[5, 7], [6, 8]], H * 0.186), fo: len([[7, 9], [8, 10]], H * 0.146),
+      th: len([[11, 13], [12, 14]], H * 0.245), sh: len([[13, 15], [14, 16]], H * 0.246),
+      shW: H * 0.215, hipW: H * 0.13, earW: H * 0.085, nose: H * 0.06
+    };
+    fz.upper = fz.L.up; fz.fore = fz.L.fo;
+    return fz;
+  }
+  const smooth01 = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
+  function pose3dSingle(fz, t) {
+    const k = kpAt(fz.track, t); if (!k) return null;
+    const c = fz.cpp, o = fz.o, L = fz.L, front = fz.single === 'front';
+    const P = k.map(q => (front
+      ? { x: (q.x - o.x) * c * fz.sT, y: (o.y - q.y) * c, z: 0, s: q.s }
+      : { x: 0, y: (o.y - q.y) * c, z: (q.x - o.x) * c * fz.sF, s: q.s }));
+    const d2 = (a, b) => (front ? Math.hypot(P[b].x - P[a].x, P[b].y - P[a].y) : Math.hypot(P[b].z - P[a].z, P[b].y - P[a].y));
+    const rest = (len, a, b) => Math.sqrt(Math.max(0, len * len - d2(a, b) ** 2)); // 写らない向きの長さ
+    const B = fz.ph.bounds, tH = fz.ph.tHanare;
+    // 馬手の肘: 打起しまでは体の前、引分けで後ろへ回る。馬手の手首: 離れまでは内（顔の方）、離れで後ろへ振れる
+    const draw = smooth01((t - B[4]) / Math.max(0.2, B[5] - B[4]));
+    const rel = smooth01((t - tH) / 0.15);
+    if (front) {
+      // 前後（z, 前が +）。体幹と脚は正面を向いて画面に沿っているとみなす
+      P[7].z = rest(L.up, 5, 7); P[9].z = P[7].z + rest(L.fo, 7, 9);
+      P[8].z = (1 - 2 * draw) * rest(L.up, 6, 8); P[10].z = P[8].z + (1 - 2 * rel) * rest(L.fo, 8, 10);
+      const hc = { x: (P[3].x + P[4].x) / 2, y: (P[3].y + P[4].y) / 2 };
+      const nz = Math.sqrt(Math.max(0, L.nose * L.nose - (P[0].x - hc.x) ** 2 - (P[0].y - hc.y) ** 2));
+      P[0].z = nz; P[1].z = P[2].z = nz * 0.85;
+    } else {
+      // 的の方向（x, 的が +）。弓手（左）側が的の方
+      const half = (w, a, b) => rest(w, a, b) / 2;
+      const hw = half(L.hipW, 11, 12), sw = half(L.shW, 5, 6), ew = half(L.earW, 3, 4);
+      P[11].x = hw; P[12].x = -hw; P[5].x = sw; P[6].x = -sw; P[3].x = ew; P[4].x = -ew;
+      P[13].x = P[11].x + rest(L.th, 11, 13); P[15].x = P[13].x + rest(L.sh, 13, 15);
+      P[14].x = P[12].x - rest(L.th, 12, 14); P[16].x = P[14].x - rest(L.sh, 14, 16);
+      // 弓手の前腕: 打起しまでは体の中心の方（内）、引分けからは的の方
+      P[7].x = P[5].x + rest(L.up, 5, 7); P[9].x = P[7].x + (2 * draw - 1) * rest(L.fo, 7, 9);
+      P[8].x = P[6].x - rest(L.up, 6, 8); P[10].x = P[8].x + (1 - 2 * rel) * rest(L.fo, 8, 10);
+      const hc = { z: (P[3].z + P[4].z) / 2, y: (P[3].y + P[4].y) / 2 };
+      const nx = Math.sqrt(Math.max(0, L.nose * L.nose - (P[0].z - hc.z) ** 2 - (P[0].y - hc.y) ** 2));
+      P[0].x = nx; P[1].x = nx * 0.85 + ew * 0.4; P[2].x = nx * 0.85 - ew * 0.4;
+      // 足首の中点を原点に
+      const mx = (P[15].x + P[16].x) / 2; for (const q of P) q.x -= mx;
+    }
+    return P;
+  }
+
   function pose3dAt(fz, t) {
+    if (fz && fz.single) return pose3dSingle(fz, t);
     const p = pose3dRaw(fz, t);
     if (!p || !fz.upper) return p;
     // 測った肘が軸の上に来て向きが定まらない時のために、ごく小さく外側・後ろ寄りの癖を付ける
@@ -1049,6 +1120,169 @@ const Kyu = (() => {
     return { kind: 'mete', w: 720, h: 960, duration: dur, fps: 240, slow: 1, frames, sample: true, tH };
   }
 
-  return { KP, NK, EDGES, PHASES, KASUMI, DT, prepareTrack, kpAt, kpAtGrid, gIndex, detectPhases, syncOffset, evenPhases, phaseAt, computeMetrics, fuseSetup, pose3dAt, targetStats, zoneOf, dirWords, makeSample, median, clamp, tilt, HAND_EDGES, TPH, prepareClose, closeAt, closeGrid, cIndex, detectClosePhases, closePhaseAt, yundeMetrics, meteMetrics, makeYundeSample, makeMeteSample, meteMarkers, meteGeom };
+  // ---------- 音で時刻を合わせる ----------
+  // 動画の音から「音の立ち上がり」の強さを、毎秒 rate 個の 0〜255 の値にする。
+  // 弦音・的中音・物音のような短く鋭い音ほど大きくなる。chs: 各チャンネルの Float32Array
+  function audioEnvelope(chs, sr, rate = 200) {
+    const n = chs[0].length, hop = Math.max(1, Math.round(sr / rate)), F = Math.floor(n / hop);
+    const e = new Float32Array(F);
+    let prev = 0;
+    for (let f = 0; f < F; f++) {
+      let s = 0;
+      for (let i = f * hop, end = i + hop; i < end; i++) {
+        let x = 0; for (const c of chs) x += c[i]; x /= chs.length;
+        const d = x - prev; prev = x; s += d * d; // 1 次の差分で高い音（鋭い音）を強める
+      }
+      e[f] = Math.log10(1e-10 + s / hop);
+    }
+    const on = new Float32Array(F);
+    for (let f = 3; f < F; f++) on[f] = Math.max(0, e[f] - (e[f - 1] + e[f - 2] + e[f - 3]) / 3);
+    const sorted = Array.from(on).filter(v => v > 0).sort((a, b) => a - b);
+    const top = sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.998))] : 0;
+    const out = new Uint8Array(F);
+    if (top > 0) for (let f = 0; f < F; f++) out[f] = Math.min(255, Math.round(on[f] / top * 255));
+    return { rate, env: out };
+  }
+  // 2 本の音の立ち上がりを重ね合わせ、一番よく重なるずれを探す。
+  // 戻り値 offset = (a の時刻) − (b の時刻)（同じ音について）。score: 重なりの強さ 0〜1、ratio: 2 番目の候補との差
+  function audioSync(A, B, opt = {}) {
+    if (!A || !B || A.rate !== B.rate) return null;
+    const rate = A.rate, a = A.env, b = B.env;
+    const pool = Math.max(1, Math.round(rate / 50)); // 粗く探す時は 50Hz に（鋭い音は最大値で残す）
+    const down = (x) => { const m = Math.floor(x.length / pool), o = new Float32Array(m); for (let i = 0; i < m; i++) { let v = 0; for (let j = 0; j < pool; j++) v = Math.max(v, x[i * pool + j]); o[i] = v; } return o; };
+    const ad = down(a), bd = down(b), r2 = rate / pool;
+    const maxLag = Math.round((opt.maxLag || 20) * r2), minOv = Math.round((opt.minOverlap || 3) * r2);
+    // 重なった所だけで割ると、重なりが短い時にたまたま 1 つ音がそろっただけで高く出るので、全体の大きさで割る
+    const en = (x) => { let s = 0; for (let i = 0; i < x.length; i++) s += x[i] * x[i]; return s; };
+    const E = new Map([[ad, en(ad)], [bd, en(bd)], [a, en(a)], [b, en(b)]]);
+    const corr = (x, y, k) => { // x[i] と y[i - k]
+      const i0 = Math.max(0, k), i1 = Math.min(x.length, y.length + k);
+      if (i1 - i0 < minOv * (x === ad ? 1 : pool)) return -1;
+      let s = 0; for (let i = i0; i < i1; i++) s += x[i] * y[i - k];
+      const d = Math.sqrt(E.get(x) * E.get(y));
+      return d > 0 ? s / d : -1;
+    };
+    const cs = [];
+    for (let k = -maxLag; k <= maxLag; k++) cs.push([k, corr(ad, bd, k)]);
+    cs.sort((p, q) => q[1] - p[1]);
+    if (!cs.length || cs[0][1] <= 0) return null;
+    // 候補（離れた山）を 3 つまで
+    const peaks = [];
+    for (const [k, c] of cs) { if (c <= 0) break; if (peaks.every(p => Math.abs(p[0] - k) > 0.25 * r2)) peaks.push([k, c]); if (peaks.length >= 3) break; }
+    // 細かく（元の rate で）合わせ直す
+    const fine = peaks.map(([k, c]) => {
+      let best = [k * pool, -1];
+      for (let kk = k * pool - 2 * pool; kk <= k * pool + 2 * pool; kk++) { const v = corr(a, b, kk); if (v > best[1]) best = [kk, v]; }
+      return { offset: best[0] / rate, score: best[1] };
+    });
+    const ratio = fine.length > 1 ? fine[0].score / Math.max(1e-6, fine[1].score) : 9;
+    return { offset: fine[0].offset, score: fine[0].score, ratio, cands: fine };
+  }
+  // 音と動きの結果から、使うずれを決める
+  function chooseSync(motion, audio) {
+    if (audio && audio.score >= 0.25 && audio.ratio >= 1.25) return { offset: audio.offset, method: '音（弦音など）', audio: true };
+    if (audio && motion) {
+      // 音の候補のうち、動きの推定に近いものがあればそれを使う
+      const near = audio.cands.filter(c => Math.abs(c.offset - motion.offset) < 1.0 && c.score >= 0.2).sort((p, q) => q.score - p.score)[0];
+      if (near) return { offset: near.offset, method: '音と動き', audio: true };
+    }
+    return motion ? { offset: motion.offset, method: motion.method, audio: false } : null;
+  }
+
+  // ---------- 矢所の写真: 的に輪を合わせる ----------
+  // 中心付近のタップから放射状に明るさを読み、霞的の白黒の幅の比に一番合う大きさを方向ごとに探して、楕円を当てはめる。
+  // lum: 輝度（0〜255）W×H。戻り値 {cx, cy, rx, ry, score, used} か null（見つからない）
+  const KASUMI_EDGES = [3.6, 7.2, 10.2, 11.7, 14.7, 18.0].map(r => r / 18);
+  function fitTarget(lum, W, H, tx, ty, opt = {}) {
+    const at = (x, y) => {
+      if (!(x >= 0 && y >= 0 && x <= W - 1 && y <= H - 1)) return NaN;
+      const x0 = Math.floor(x), y0 = Math.floor(y), fx = x - x0, fy = y - y0, i = y0 * W + x0;
+      const dx = x0 < W - 1 ? 1 : 0, dy = y0 < H - 1 ? W : 0;
+      return (lum[i] * (1 - fx) + lum[i + dx] * fx) * (1 - fy) + (lum[i + dy] * (1 - fx) + lum[i + dy + dx] * fx) * fy;
+    };
+    // 白 +1、黒 −1。外黒の外は的枠（明るい）
+    const tpl = (u) => { if (u >= 1) return 1; let k = 0; while (u >= KASUMI_EDGES[k]) k++; return k % 2 === 0 ? 1 : -1; };
+    const M = 64, U = [], T = [];
+    for (let k = 0; k < M; k++) { const u = 0.06 + k * (1.05 - 0.06) / (M - 1); U.push(u); T.push(tpl(u)); }
+    const tm = T.reduce((s, v) => s + v, 0) / M; for (let k = 0; k < M; k++) T[k] -= tm;
+    const tn = Math.sqrt(T.reduce((s, v) => s + v * v, 0));
+    const NR = opt.rays || 72, Rmin = opt.rMin || 12;
+    const Rs = []; for (let R = Rmin; R < Math.hypot(W, H); R *= 1.012) Rs.push(R);
+    function rayScores(cx, cy) {
+      const out = [];
+      for (let j = 0; j < NR; j++) {
+        const th = j / NR * 2 * Math.PI, ux = Math.cos(th), uy = Math.sin(th);
+        const sc = new Float32Array(Rs.length).fill(NaN);
+        for (let q = 0; q < Rs.length; q++) {
+          const R = Rs[q];
+          if (!Number.isFinite(at(cx + ux * R * 1.05, cy + uy * R * 1.05))) break;
+          let mean = 0; const P = new Float32Array(M);
+          for (let k = 0; k < M; k++) { P[k] = at(cx + ux * U[k] * R, cy + uy * U[k] * R); mean += P[k]; }
+          mean /= M;
+          let s = 0, n2 = 0; for (let k = 0; k < M; k++) { const d = P[k] - mean; s += d * T[k]; n2 += d * d; }
+          sc[q] = n2 > 1e-6 ? s / (Math.sqrt(n2) * tn) : 0;
+        }
+        out.push({ ux, uy, sc });
+      }
+      return out;
+    }
+    function fitEllipse(pts) {
+      // A x² + C y² + D x + E y = 1 を最小二乗で
+      const S = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]], b = [0, 0, 0, 0];
+      for (const p of pts) { const v = [p.x * p.x, p.y * p.y, p.x, p.y]; for (let i = 0; i < 4; i++) { b[i] += v[i]; for (let k = 0; k < 4; k++) S[i][k] += v[i] * v[k]; } }
+      // ガウスの消去
+      for (let i = 0; i < 4; i++) {
+        let piv = i; for (let r = i + 1; r < 4; r++) if (Math.abs(S[r][i]) > Math.abs(S[piv][i])) piv = r;
+        [S[i], S[piv]] = [S[piv], S[i]]; [b[i], b[piv]] = [b[piv], b[i]];
+        if (Math.abs(S[i][i]) < 1e-12) return null;
+        for (let r = 0; r < 4; r++) if (r !== i) { const f = S[r][i] / S[i][i]; for (let k = i; k < 4; k++) S[r][k] -= f * S[i][k]; b[r] -= f * b[i]; }
+      }
+      const [Aq, Cq, Dq, Eq] = b.map((v, i) => v / S[i][i]);
+      if (!(Aq > 0 && Cq > 0)) return null;
+      const cx = -Dq / (2 * Aq), cy = -Eq / (2 * Cq), G = 1 + Aq * cx * cx + Cq * cy * cy;
+      if (!(G > 0)) return null;
+      return { cx, cy, rx: Math.sqrt(G / Aq), ry: Math.sqrt(G / Cq) };
+    }
+    let cx = tx, cy = ty, res = null;
+    for (let it = 0; it < 3; it++) {
+      const rays = rayScores(cx, cy);
+      // 全方向で合う大きさの目安
+      let bestQ = -1, bestS = -Infinity;
+      for (let q = 0; q < Rs.length; q++) {
+        let s = 0, n = 0; for (const r of rays) if (Number.isFinite(r.sc[q])) { s += r.sc[q]; n++; }
+        if (n >= NR * 0.5 && s / n > bestS) { bestS = s / n; bestQ = q; }
+      }
+      if (bestQ < 0) return null;
+      const R0 = Rs[bestQ];
+      // 方向ごとに、目安の 0.55〜1.8 倍の範囲で一番合う所
+      const pts = [];
+      for (const r of rays) {
+        let bq = -1, bs = -Infinity;
+        for (let q = 0; q < Rs.length; q++) { const R = Rs[q]; if (R < 0.55 * R0 || R > 1.8 * R0 || !Number.isFinite(r.sc[q])) continue; if (r.sc[q] > bs) { bs = r.sc[q]; bq = q; } }
+        if (bq >= 0 && bs >= 0.45) pts.push({ x: cx + r.ux * Rs[bq] - cx, y: cy + r.uy * Rs[bq] - cy, s: bs, R: Rs[bq] });
+      }
+      if (pts.length < NR * 0.35) return null;
+      // 外れた点を除いて当てはめ（座標はいまの中心からの相対）
+      let use = pts, e = fitEllipse(use);
+      for (let pass = 0; pass < 2 && e; pass++) {
+        const resid = use.map(p => Math.abs(Math.hypot((p.x - e.cx) / e.rx, (p.y - e.cy) / e.ry) - 1));
+        const med = median(resid.slice()), mad = median(resid.map(v => Math.abs(v - med))) || 0.01;
+        const keep = use.filter((p, i) => resid[i] <= Math.max(0.06, med + 3 * mad));
+        if (keep.length < 8) break;
+        use = keep; e = fitEllipse(use);
+      }
+      if (!e) return null;
+      const ncx = cx + e.cx, ncy = cy + e.cy;
+      res = { cx: ncx, cy: ncy, rx: e.rx, ry: e.ry, score: use.reduce((s, p) => s + p.s, 0) / use.length, used: use.length / NR };
+      const moved = Math.hypot(ncx - cx, ncy - cy);
+      cx = ncx; cy = ncy;
+      if (moved < 0.5) break;
+    }
+    if (!res || !(res.rx > 5 && res.ry > 5) || res.rx / res.ry > 3 || res.ry / res.rx > 3) return null;
+    if (res.score < 0.5 || res.used < 0.4) return null;
+    return res;
+  }
+
+  return { KP, NK, EDGES, PHASES, KASUMI, DT, prepareTrack, kpAt, kpAtGrid, gIndex, detectPhases, syncOffset, evenPhases, phaseAt, computeMetrics, fuseSetup, pose3dAt, targetStats, zoneOf, dirWords, makeSample, median, clamp, tilt, HAND_EDGES, TPH, prepareClose, closeAt, closeGrid, cIndex, detectClosePhases, closePhaseAt, yundeMetrics, meteMetrics, makeYundeSample, makeMeteSample, meteMarkers, meteGeom, audioEnvelope, audioSync, chooseSync, fitTarget, fuseSingle };
 })();
 if (typeof module !== 'undefined') module.exports = Kyu;

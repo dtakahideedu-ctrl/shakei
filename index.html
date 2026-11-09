@@ -172,6 +172,7 @@ button.chip { border: 0; cursor: pointer; }
 .vidrow input { accent-color: var(--main); }
 .vidrow input[type="range"] { width: 140px; }
 .vidrow input:disabled + span, .vidrow input:disabled { opacity: .45; }
+.top-note { margin: 0; font-size: 12px; color: var(--muted); max-width: 46ch; text-align: center; }
 .zoom { position: absolute; right: 8px; top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .zoom button { width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255,255,255,.28); background: rgba(12,14,17,.72); color: #f1f3f5; font-size: 18px; line-height: 1; padding: 0; }
 .stage.wide3d { grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); align-items: start; }
@@ -256,6 +257,7 @@ button.chip { border: 0; cursor: pointer; }
 @media (min-width: 820px) { .target-grid { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); align-items: start; } }
 .photo-box { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .steps { display: flex; flex-wrap: wrap; gap: 6px; }
+#stepHint { min-height: 3em; }
 .step { font-size: 12px; padding: 4px 9px; border-radius: 999px; background: var(--sunk); color: var(--muted); }
 .step[aria-current="true"] { background: var(--ink); color: var(--bg); font-weight: 700; }
 .step.done { color: var(--ok); }
@@ -332,6 +334,13 @@ body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
   .modes button b { font-size: 15.5px; }
   .modes button span { font-size: 11px; }
 }
+/* 離れで時刻を合わせる */
+.align-bar { margin-top: 10px; padding: 10px 12px; border-radius: var(--r); background: var(--info-bg); border: 1px solid var(--main); display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.align-bar p { margin: 0; }
+.align-bar b { color: var(--main); }
+.align-btns { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.align-btns button:not(.btn) { border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 6px 9px; font-size: 12.5px; font-family: var(--font-num); }
+.adj-row .wide-btn { grid-column: 1 / -1; justify-self: start; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 /* 合言葉と AI 講評（ウェブ版） */
 .login { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 8px; align-items: end; }
@@ -457,7 +466,7 @@ body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
         <li>三脚などで固定し、足踏みから残心まで全身が入るように撮ります。</li>
         <li>正面: 射手の体の正面、胸の高さから。的は画面の横方向になります。</li>
         <li>馬手側: 射手の右側、矢の延長線上から的の方向を向けて撮ります。</li>
-        <li>2本の動画は同時に撮らなくても、同じ射なら自動で時刻を合わせます。</li>
+        <li>2本の動画は録画の始まりをそろえなくても、弦音などの音と体の動きから自動で時刻を合わせます。音は消さずに撮ってください。</li>
         <li>矢所の写真は、的の正面（射手側）からなるべくまっすぐ撮ります。</li>
         <li>何人かで撮る時は、1人が「＋ 新しい射」を押し、ほかの人は同じページを開いて合言葉を入れ、それぞれの枠に登録します。</li>
       </ul>
@@ -479,7 +488,7 @@ body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
   <div class="banner" id="sampleBanner"><b>サンプル表示中</b><span id="sampleText">合成データの射です。動画を選ぶと、あなたの射に切り替わります。</span></div>
 
   <section id="viewer" class="m-sk" aria-labelledby="h-view">
-    <div class="sec-h"><h2 id="h-view">射</h2><span class="sub" id="viewSub">2方向を合成した立体と、動画に重ねた骨格・矢・三重十文字</span></div>
+    <div class="sec-h"><h2 id="h-view">射</h2><span class="sub" id="viewSub">立体（動画1本でも見られます）と、動画に重ねた骨格・矢・三重十文字</span></div>
     <div class="viewbar">
       <div class="seg" role="group" aria-label="表示する動画">
         <button type="button" data-layout="3d" aria-pressed="true">立体</button>
@@ -534,9 +543,11 @@ body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
           <label class="vid-on"><input type="checkbox" id="vidOn" checked> 動画を重ねる</label>
           <label class="vid-alpha"><span>濃さ</span><input type="range" id="vidAlpha" min="10" max="100" step="5" value="55" aria-label="重ねる動画の濃さ"></label>
         </div>
+        <p class="top-note" id="topNote" hidden></p>
       </figure>
     </div>
 
+    <div class="align-bar" id="alignBar" hidden aria-live="polite"><p id="alignMsg"></p><div class="align-btns" id="alignBtns"></div></div>
     <div class="transport">
       <button type="button" class="tbtn" id="prevPhase" aria-label="前の節へ"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M4 4h2v12H4zM16 4v12L7 10z"/></svg></button>
       <button type="button" class="tbtn" id="stepBack" aria-label="1コマ戻る"><svg viewBox="0 0 20 20" fill="currentColor"><path d="M13 4v12L5 10z"/></svg></button>
@@ -590,10 +601,8 @@ body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
     <div class="target-grid">
       <div class="photo-box">
         <div class="steps" id="steps">
-          <span class="step" data-step="0">1 中心</span>
-          <span class="step" data-step="1">2 右の縁</span>
-          <span class="step" data-step="2">3 上の縁</span>
-          <span class="step" data-step="3">4 矢所を打つ</span>
+          <span class="step" data-step="0">1 的の中心をタップ</span>
+          <span class="step" data-step="3">2 矢所を打つ</span>
         </div>
         <p class="foot" id="stepHint" style="margin:0"></p>
         <canvas id="photo" aria-label="矢所の写真。タップで印を付ける"></canvas>
