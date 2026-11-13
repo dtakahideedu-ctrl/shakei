@@ -538,6 +538,7 @@ function drawVideoPlanes(ctx, pr, dir) {
   const fz = S.fz, planes = [];
   let any = false;
   for (const key of ['front', 'side']) {
+    if (fz.single && fz.single !== key) continue; // 1 本から推した立体には、その動画だけを重ねる
     const v = V[key], src = frameSource(v);
     if (!src) continue;
     any = true;
@@ -1348,7 +1349,7 @@ function renderSchem() {
 
 async function onPhotoFile(file) {
   if (!file) return;
-  if (SH.db && !SH.shotId && !SH.writeBlocked && SH.canWrite !== false) await createShot();
+  if (SH.db && !SH.shotId && !SH.writeBlocked && SH.canWrite !== false) await joinOrCreateShot('target');
   if (S.sample) { exitSample(); recompute(true); }
   const url = URL.createObjectURL(file);
   const img = new Image();
@@ -1368,7 +1369,7 @@ async function onPhotoFile(file) {
 async function onVideoFile(key, file) {
   if (!file || S.busy) return;
   pause();
-  if (SH.db && !SH.shotId && !SH.writeBlocked && SH.canWrite !== false) await createShot();
+  if (SH.db && !SH.shotId && !SH.writeBlocked && SH.canWrite !== false) await joinOrCreateShot(key);
   if (S.sample) exitSample();
   const v = V[key];
   if (v.url) URL.revokeObjectURL(v.url);
@@ -1606,6 +1607,44 @@ function copySummary(msgEl, anchor) {
 }
 $('#copyBtn').addEventListener('click', (e) => copySummary($('#copyMsg'), e.currentTarget.parentElement));
 
+// ---------- 記録の一覧（日ごとにまとめ、空のまま残った記録は隠す） ----------
+const PART_NAMES = { front: '正面', side: '馬手側', target: '矢所', yunde: '弓手', mete: '馬手' };
+// 記録に登録済みの枠（アーティファクト版は filled、ウェブ版は parts）。分からない古い記録は null
+function recParts(s) { return Array.isArray(s.filled) ? s.filled : Array.isArray(s.parts) ? s.parts : null; }
+const isEmptyRec = (s) => { const p = recParts(s); return !!p && p.length === 0 && !s.memo; };
+// 何も登録されず、メモもないまま 1 時間たった記録（間違って作られたもの）
+const staleEmpty = (s, curId) => s.id !== curId && isEmptyRec(s) && Date.now() - (s.createdAt || 0) > 3600e3;
+function dayLabel(ms) {
+  const d = new Date(ms), now = new Date(), day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 864e5);
+  return diff === 0 ? `今日（${d.getMonth() + 1}月${d.getDate()}日）` : diff === 1 ? `昨日（${d.getMonth() + 1}月${d.getDate()}日）` : `${d.getMonth() + 1}月${d.getDate()}日`;
+}
+function recLabel(s) {
+  const d = new Date(s.createdAt || 0), p = recParts(s), today = new Date().toDateString() === d.toDateString();
+  const parts = p ? (p.length ? '〔' + p.map(k => PART_NAMES[k] || k).join('・') + '〕' : '〔まだ空〕') : '';
+  const when = (today ? '' : `${d.getMonth() + 1}/${d.getDate()} `) + `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return [when, s.memo || '', parts].filter(Boolean).join('　');
+}
+// 一覧を日ごとに分けて入れる。隠した件数を返す
+function fillRecSelect(sel, list, curId, cur) {
+  sel.textContent = '';
+  const add = (parent, v, l) => { const o = document.createElement('option'); o.value = v; o.textContent = l; parent.appendChild(o); };
+  add(sel, '', 'サンプル（合成データ）');
+  const items = list.filter(s => !staleEmpty(s, curId)).map(s => (s.id === curId && cur ? { ...s, memo: cur.memo != null ? cur.memo : s.memo } : s));
+  if (curId && cur && !items.some(s => s.id === curId)) items.unshift({ ...cur, id: curId, parts: recParts(cur) || undefined });
+  let grp = null, lab = '';
+  for (const s of items) {
+    const L = dayLabel(s.createdAt || 0);
+    if (L !== lab) { grp = document.createElement('optgroup'); grp.label = L; sel.appendChild(grp); lab = L; }
+    add(grp, s.id, recLabel(s));
+  }
+  sel.value = curId || '';
+  return list.filter(s => staleEmpty(s, curId));
+}
+// 動画や写真を選んだ時、作られたばかり（15 分以内）で自分の枠が空いている記録があれば、新しく作らずにそこへ入れる
+const JOIN_WINDOW = 15 * 60e3;
+const joinable = (list, kind) => list.filter(s => Date.now() - (s.createdAt || 0) < JOIN_WINDOW && Array.isArray(recParts(s)) && !recParts(s).includes(kind));
+
 // ---------- 共有（GAS のサーバーに保存し、合言葉を知っている人で見る） ----------
 // 射ごとに 1 行（スプレッドシート）。骨格データと画像はドライブ。数秒ごとに変化を確かめる
 const API_URL = ((window.SHAKEI_CONFIG || {}).apiUrl || '').trim();
@@ -1780,7 +1819,7 @@ async function pollTick() {
   schedulePoll();
 }
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && SH.db) { clearTimeout(SH.pollT); pollTick(); } });
-async function pollList(first) {
+async function pollList(first, noAuto) {
   const prev = new Set(SH.shots.map(s => s.id)), prevH = new Set(HR.list.map(s => s.id));
   const r = await api('list');
   lastList = Date.now();
@@ -1790,10 +1829,10 @@ async function pollList(first) {
   SH.listState = 'ok';
   const fresh = (s) => Date.now() - (s.createdAt || 0) < 12 * 3600e3;
   const nh = HR.list[0];
-  if (nh && !HR.id && !HR.declinedAuto && !S.busy && !anyTeWork() && fresh(nh)) selectHand(nh.id);
+  if (nh && !noAuto && !HR.id && !HR.declinedAuto && !S.busy && !anyTeWork() && fresh(nh)) selectHand(nh.id);
   else if (nh && HR.id && nh.id !== HR.id && !first && !prevH.has(nh.id) && nh.createdBy !== SH.uid) HR.newer = nh.id;
   const newest = SH.shots[0];
-  if (newest && !SH.shotId && !SH.declinedAuto && !S.busy && (S.sample || !anyLocalWork()) && fresh(newest)) { selectShot(newest.id); return; }
+  if (newest && !noAuto && !SH.shotId && !SH.declinedAuto && !S.busy && (S.sample || !anyLocalWork()) && fresh(newest)) { selectShot(newest.id); return; }
   if (newest && SH.shotId && newest.id !== SH.shotId && !first && !prev.has(newest.id) && newest.createdBy !== SH.uid) SH.newer = newest.id;
   renderShotBar();
 }
@@ -1879,6 +1918,13 @@ function writeError(e) {
 }
 const canShare = () => !!(SH.db && SH.shotId && !SH.writeBlocked && SH.canWrite);
 async function track(p) { SH.pending++; try { return await p; } finally { SH.pending--; } }
+// 動画や写真を選んだ時: 一覧を確かめ直し、作られたばかりで自分の枠が空いている射があれば、そこへ入れる
+async function joinOrCreateShot(kind) {
+  try { await pollList(false, true); } catch (e) { /* 一覧を取れなくても続ける */ }
+  const c = joinable(SH.shots, kind)[0];
+  if (c) { SH.declinedAuto = false; selectShot(c.id); SH.msg = `作られたばかりの射「${recLabel(c)}」に登録します。別の射にする時は「＋ 新しい射」を押してから選び直してください。`; renderShotBar(); return true; }
+  return createShot();
+}
 async function createShot() {
   if (!SH.db || SH.writeBlocked || !SH.canWrite) return false;
   try {
@@ -2022,12 +2068,10 @@ function renderShotBar() {
   $('#shotLbl').textContent = te ? '手の記録' : '射の記録';
   const sel = $('#shotSel');
   sel.setAttribute('aria-label', te ? '手の記録を選ぶ' : '射の記録を選ぶ');
-  const opts = [['', 'サンプル（合成データ）']].concat(list.map(s => [s.id, fmtShot(s.id === curId && cur ? cur : s)]));
-  if (curId && !list.some(s => s.id === curId) && cur) opts.splice(1, 0, [curId, fmtShot(cur)]);
-  sel.textContent = '';
-  for (const [v, l] of opts) { const o = document.createElement('option'); o.value = v; o.textContent = l; sel.appendChild(o); }
-  sel.value = curId || '';
+  const stale = fillRecSelect(sel, list, curId, cur); SH.stale = stale;
   sel.disabled = S.busy;
+  const cl = $('#cleanEmpty'); cl.hidden = !(stale.length && SH.canEdit) || confirm;
+  cl.textContent = `空のまま残った記録 ${stale.length} 件を消す`;
   const ro = SH.writeBlocked || !SH.canWrite;
   const nb = $('#newShot'); nb.hidden = ro; nb.textContent = te ? '＋ 新しい記録' : '＋ 新しい射';
   const memo = $('#shotMemo');
@@ -2042,6 +2086,7 @@ function renderShotBar() {
   const notes = [];
   if (SH.listState === 'loading') notes.push('記録を読み込んでいます…');
   if (SH.msg) notes.push(SH.msg);
+  if (stale.length) notes.push(`何も登録されないまま1時間たった記録 ${stale.length} 件は、一覧に出していません。`);
   if (ro && !SH.msg) notes.push('閲覧のみの合言葉です。ここで解析した結果は共有されません。');
   if (!curId && !ro) notes.push(te ? '接写の動画を選ぶと新しい手の記録ができ、合言葉を知っている人に届きます。' : '動画か写真を選ぶと新しい射の記録ができ、合言葉を知っている人に届きます。');
   if (curId && !ro && cur) {
@@ -2081,11 +2126,20 @@ $('#shotMemo').addEventListener('change', (e) => {
   const m = e.target.value.slice(0, 60);
   if (uiMode === 'te') { if (HR.rec) { HR.rec = { ...HR.rec, memo: m }; shareHand({ memo: m }); } }
   else if (SH.shot) { SH.shot = { ...SH.shot, memo: m }; shareShot({ memo: m }); }
+  renderShotBar();
 });
 $('#delShot').addEventListener('click', () => { if (uiMode === 'te') HR.confirmDel = true; else SH.confirmDel = true; renderShotBar(); });
 $('#delNo').addEventListener('click', () => { HR.confirmDel = false; SH.confirmDel = false; renderShotBar(); });
 $('#delYes').addEventListener('click', () => { const te = uiMode === 'te'; HR.confirmDel = false; SH.confirmDel = false; if (te) deleteHand(); else deleteShot(); });
 $('#shotGo').addEventListener('click', () => { if (uiMode === 'te') { if (HR.newer) selectHand(HR.newer); } else if (SH.newer) selectShot(SH.newer); });
+$('#cleanEmpty').addEventListener('click', async () => {
+  const list = (SH.stale || []).slice(); if (!list.length || !SH.canEdit) return;
+  let n = 0;
+  for (const r of list) { try { await track(api('deleteShot', { id: r.id })); n++; } catch (e) { if (e.code !== 'not_found') { writeError(e); return; } } }
+  const gone = new Set(list.map(r => r.id));
+  SH.shots = SH.shots.filter(r => !gone.has(r.id)); HR.list = HR.list.filter(r => !gone.has(r.id));
+  SH.msg = `空の記録を ${n} 件消しました。`; renderShotBar();
+});
 $('#loginForm').addEventListener('submit', (e) => {
   e.preventDefault();
   const k = $('#loginKey').value.trim(), n = $('#loginName').value.trim().slice(0, 20);
@@ -2110,6 +2164,12 @@ async function createHand() {
     HR.declinedAuto = false; selectHand(r.shot.id);
     return true;
   } catch (e) { writeError(e); return false; }
+}
+async function joinOrCreateHand(kind) {
+  try { await pollList(false, true); } catch (e) { /* 一覧を取れなくても続ける */ }
+  const c = joinable(HR.list, kind)[0];
+  if (c) { HR.declinedAuto = false; selectHand(c.id); SH.msg = `作られたばかりの手の記録「${recLabel(c)}」に登録します。`; renderShotBar(); return true; }
+  return createHand();
 }
 function selectHand(id) {
   if (S.busy) return;
@@ -2721,7 +2781,7 @@ function estimateFps(video) {
 async function onTeFile(key, file) {
   if (!file || S.busy) return;
   tePause(); pause();
-  if (SH.db && !HR.id && canCreateTe()) await createHand();
+  if (SH.db && !HR.id && canCreateTe()) await joinOrCreateHand(key);
   if (TE.sample) resetTe();
   const s = TV[key];
   if (s.url) URL.revokeObjectURL(s.url);

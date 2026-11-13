@@ -404,6 +404,7 @@ body:not(.mode-te) .m-te, body.mode-te .m-sk { display: none !important; }
       <input type="text" id="shotMemo" maxlength="60" placeholder="メモ（射手の名前・何本目など）" aria-label="この射のメモ" hidden>
       <div class="shot-newer" id="shotNewer" hidden><span id="shotNewerText"></span><button type="button" class="btn small ghost" id="shotGo">その射へ移る</button></div>
       <div class="shot-del">
+        <button type="button" class="linkish" id="cleanEmpty" hidden>空のまま残った記録を消す</button>
         <button type="button" class="linkish" id="delShot" hidden>この射の記録を消す</button>
         <span id="delConfirm" hidden><span id="delWhat">動画の結果・写真・印がすべて消えます。</span><button type="button" class="linkish danger" id="delYes">消す</button><button type="button" class="linkish" id="delNo">やめる</button></span>
       </div>
